@@ -2,7 +2,7 @@ import { NextResponse } from 'next/server';
 import { google } from 'googleapis';
 import crypto from 'crypto';
 
-// Ustawienia środowiska KSeF (Zmień na 'https://ksef-test.mf.gov.pl/api' jeśli używasz dema)
+// Zmień na 'https://ksef-test.mf.gov.pl/api' jeśli to środowisko testowe
 const KSEF_BASE_URL = 'https://ksef.mf.gov.pl/api';
 
 export async function POST(request) {
@@ -10,12 +10,14 @@ export async function POST(request) {
     const body = await request.json();
     const { secretKey, sheetId } = body;
 
-    // 1. Weryfikacja hasła
+    // 1. Zabezpieczenie
     if (secretKey !== process.env.API_SECRET_KEY) {
-      return NextResponse.json({ error: "Odmowa dostępu. Nieprawidłowy klucz API." }, { status: 401 });
+      return NextResponse.json({ error: "Odmowa dostępu. Nieprawidłowy klucz." }, { status: 401 });
     }
 
-    // 2. Połączenie z Google Sheets API
+    const nipFirmy = (process.env.NIP_FIRMY || "").replace(/\D/g, '');
+
+    // 2. Połączenie z Google Sheets
     const auth = new google.auth.GoogleAuth({
       credentials: {
         client_email: process.env.GOOGLE_SERVICE_ACCOUNT_EMAIL,
@@ -25,95 +27,119 @@ export async function POST(request) {
     });
     const sheets = google.sheets({ version: 'v4', auth });
 
-    // 3. Pobranie istniejących faktur z Arkusza (Kolumna H), aby uniknąć duplikatów
+    // 3. Pobranie istniejących faktur (Deduplikacja)
     let existingInvoiceNumbers = new Set();
     try {
       const existingData = await sheets.spreadsheets.values.get({
         spreadsheetId: sheetId,
-        range: 'Arkusz1!H:H', // Zakładamy, że kolumna H to numery faktur
+        range: 'Arkusz1!H:H',
       });
       const rows = existingData.data.values;
       if (rows && rows.length > 0) {
         existingInvoiceNumbers = new Set(rows.map(row => row[0]).filter(Boolean));
       }
     } catch (e) {
-      console.warn("Nie udało się pobrać istniejących danych (może pusty arkusz):", e.message);
+      console.warn("Brak historii:", e.message);
     }
 
-    // 4. AUTORYZACJA W KSEF (Zarys logiki kryptograficznej)
-    // UWAGA: KSeF wymaga klucza publicznego MF do zaszyfrowania tokena. 
-    // W pełnym wdrożeniu ten blok wykonuje RSA-OAEP z użyciem klucza środowiska.
-    
-    // a) Pobranie wyzwania (Challenge)
+    // 4. Pobranie Challenge'u KSeF
     const challengeRes = await fetch(`${KSEF_BASE_URL}/online/Session/AuthorisationChallenge`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: { 'Content-Type': 'application/json', 'Accept': 'application/json' },
+      body: JSON.stringify({ contextIdentifier: { type: 'onip', identifier: nipFirmy } })
+    });
+    
+    const challengeText = await challengeRes.text();
+    let challengeData;
+    try { challengeData = JSON.parse(challengeText); } catch (e) { throw new Error(`Błąd Challenge: ${challengeText.substring(0, 100)}`); }
+    if (!challengeRes.ok) throw new Error(`KSeF Odrzucił Challenge: ${challengeData.exception?.exceptionDetailList?.[0]?.exceptionMessage}`);
+
+    // 5. AUTOMATYCZNE POBRANIE I KONWERSJA CERTYFIKATU (Zastępuje OpenSSL)
+    const certRes = await fetch(`${KSEF_BASE_URL}/common/Files/PublicKey`);
+    if (!certRes.ok) throw new Error("Nie udało się pobrać certyfikatu publicznego MF.");
+    const certBuffer = await certRes.arrayBuffer();
+    
+    // Konwersja formatu DER (binarnego) na Base64 i formatowanie do standardu PEM
+    const certBase64 = Buffer.from(certBuffer).toString('base64');
+    const publicKeyPem = `-----BEGIN CERTIFICATE-----\n${certBase64.match(/.{1,64}/g).join('\n')}\n-----END CERTIFICATE-----\n`;
+
+    // 6. SZYFROWANIE TOKENA
+    const timestamp = challengeData.timestamp;
+    const challengeToken = challengeData.challenge;
+    const authMessage = `${process.env.KSEF_TOKEN}|${timestamp}`;
+    
+    const encryptedToken = crypto.publicEncrypt(
+      { key: publicKeyPem, padding: crypto.constants.RSA_PKCS1_PADDING },
+      Buffer.from(authMessage, 'utf8')
+    ).toString('base64');
+
+    // 7. LOGOWANIE (InitToken)
+    const initSessionRes = await fetch(`${KSEF_BASE_URL}/online/Session/InitToken`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'Accept': 'application/json' },
       body: JSON.stringify({
-        contextIdentifier: { type: 'onip', identifier: process.env.NIP_FIRMY }
+        contextIdentifier: { type: 'onip', identifier: nipFirmy },
+        challengeReferenceNumber: challengeToken,
+        sessionToken: {
+          token: encryptedToken,
+          contextIdentifier: { type: 'onip', identifier: nipFirmy }
+        }
       })
     });
-    if (!challengeRes.ok) throw new Error("Błąd pobierania wyzwania KSeF");
-    const challengeData = await challengeRes.json();
-    
-    /* 
-      --- MIEJSCE NA KRYPTOGRAFIĘ RSA ---
-      Tutaj następuje zaszyfrowanie: Encrypt(KSEF_TOKEN | challengeData.timestamp)
-      i wysłanie do endpointu /online/Session/InitToken w celu uzyskania SessionToken.
-    */
-    const sessionToken = "MOCK_SESSION_TOKEN"; // Zastąpić prawdziwym tokenem z bloku wyżej
 
-    // 5. Pobranie faktur z KSeF (Query Sync)
-    // Ustawiamy daty: np. od początku bieżącego miesiąca
+    const sessionText = await initSessionRes.text();
+    let sessionData;
+    try { sessionData = JSON.parse(sessionText); } catch (e) { throw new Error(`Błąd logowania: ${sessionText.substring(0, 100)}`); }
+    if (!initSessionRes.ok) throw new Error(`KSeF InitToken Błąd: ${sessionData.exception?.exceptionDetailList?.[0]?.exceptionMessage}`);
+    
+    const sessionToken = sessionData.sessionToken.token;
+
+    // 8. POBRANIE FAKTUR KOSZTOWYCH (Od początku miesiąca)
     const dzisiaj = new Date();
     const poczatekMiesiaca = new Date(dzisiaj.getFullYear(), dzisiaj.getMonth(), 1).toISOString();
     const teraz = dzisiaj.toISOString();
 
-    /*
-      const syncRes = await fetch(`${KSEF_BASE_URL}/online/Query/Invoice/Sync`, {
-        method: 'POST',
-        headers: { 'SessionToken': sessionToken, 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          queryCriteria: {
-            subjectType: "subject2", // subject2 = faktury kosztowe (nabywca)
-            type: "incremental",
-            acquisitionTimestampThresholdFrom: poczatekMiesiaca,
-            acquisitionTimestampThresholdTo: teraz
-          }
-        })
-      });
-      const invoicesData = await syncRes.json();
-      const fetchedInvoices = invoicesData.invoiceHeaderList || [];
-    */
+    const syncRes = await fetch(`${KSEF_BASE_URL}/online/Query/Invoice/Sync`, {
+      method: 'POST',
+      headers: { 'SessionToken': sessionToken, 'Content-Type': 'application/json', 'Accept': 'application/json' },
+      body: JSON.stringify({
+        queryCriteria: {
+          subjectType: "subject2", // Nabywca
+          type: "incremental",
+          acquisitionTimestampThresholdFrom: poczatekMiesiaca,
+          acquisitionTimestampThresholdTo: teraz
+        }
+      })
+    });
 
-    // MOCK: Symulacja danych zwróconych przez KSeF dla celów demonstracji mechanizmu
-    const fetchedInvoices = [
-      { invoiceNumber: "TEST/API/2026", net: "100", vat: "23", subjectTo: { name: "Stary Kontrahent" }, invoicingDate: "2026-09-01" },
-      { invoiceNumber: "FV/123/NOWA", net: "500", vat: "115", subjectTo: { name: "Nowy Kontrahent Sp. z o.o." }, invoicingDate: "2026-09-02" }
-    ];
-
-    // 6. FILTROWANIE DUPLIKATÓW
-    const newInvoicesToAppend = [];
+    const syncText = await syncRes.text();
+    let syncData;
+    try { syncData = JSON.parse(syncText); } catch (e) { throw new Error(`Błąd pobierania list: ${syncText.substring(0, 100)}`); }
     
+    // Zamknięcie sesji w tle
+    fetch(`${KSEF_BASE_URL}/online/Session/Terminate`, { headers: { 'SessionToken': sessionToken, 'Accept': 'application/json' } }).catch(()=>{});
+
+    if (!syncRes.ok) throw new Error(`Błąd z KSeF: ${syncData.exception?.exceptionDetailList?.[0]?.exceptionMessage}`);
+
+    const fetchedInvoices = syncData.invoiceHeaderList || [];
+
+    // 9. FILTROWANIE I ZAPIS
+    const newInvoicesToAppend = [];
     for (const inv of fetchedInvoices) {
-      if (!existingInvoiceNumbers.has(inv.invoiceNumber)) {
-        // Mapowanie na kolumny A-M
-        const miesiac = inv.invoicingDate.substring(5, 7); // np. "09"
-        const kwotaBrutto = (parseFloat(inv.net) + parseFloat(inv.vat)).toFixed(2).replace('.', ',');
+      if (!existingInvoiceNumbers.has(inv.invoiceReferenceNumber)) {
+        const miesiac = inv.invoicingDate.substring(5, 7); 
+        const kwotaBrutto = (parseFloat(inv.net || 0) + parseFloat(inv.vat || 0)).toFixed(2).replace('.', ',');
 
         newInvoicesToAppend.push([
-          "", // A
-          miesiac, // B
-          inv.invoicingDate, // C
-          "", "", // D, E
-          inv.subjectTo.name, // F
-          kwotaBrutto, // G
-          inv.invoiceNumber, // H (Klucz do duplikatów)
-          "przelew", "Faktura jest", "", "", "" // I, J, K, L, M
+          "", miesiac, inv.invoicingDate, "", "",
+          inv.subjectTo?.name || "Brak nazwy",
+          kwotaBrutto,
+          inv.invoiceReferenceNumber,
+          "przelew", "Faktura jest", "", "", ""
         ]);
       }
     }
 
-    // 7. Zapis do Arkusza (Tylko jeśli są nowe faktury)
     if (newInvoicesToAppend.length > 0) {
       await sheets.spreadsheets.values.append({
         spreadsheetId: sheetId,
@@ -126,7 +152,7 @@ export async function POST(request) {
     return NextResponse.json({
       success: true,
       added: newInvoicesToAppend.length,
-      message: `Pobrano pomyślnie. Dodano nowych faktur: ${newInvoicesToAppend.length}`,
+      message: `Pobrano pomyślnie. Nowe faktury: ${newInvoicesToAppend.length}`,
     });
 
   } catch (error) {
