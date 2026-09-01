@@ -2,8 +2,8 @@ import { NextResponse } from 'next/server';
 import { google } from 'googleapis';
 import crypto from 'crypto';
 
-// Oficjalny bazowy adres API v2 KSeF
-const KSEF_BASE_URL = 'https://api.ksef.mf.gov.pl/v2';
+// Oficjalny adres bazowy KSeF 2.0
+const KSEF_BASE_URL = 'https://api.ksef.mf.gov.pl/api/v2';
 
 export async function POST(request) {
   try {
@@ -40,13 +40,12 @@ export async function POST(request) {
       console.warn("Brak historii:", e.message);
     }
 
-    // 2. KSeF v2: Poprawny endpoint pobierania Challenge (/auth/challenge)
+    // 2. KSeF 2.0: Pobranie Challenge (/auth/challenge)
     const challengeRes = await fetch(`${KSEF_BASE_URL}/auth/challenge`, {
       method: 'POST',
       headers: { 
         'Content-Type': 'application/json',
-        'Accept': 'application/json',
-        'X-Error-Format': 'problem-details'
+        'Accept': 'application/json'
       },
       body: JSON.stringify({
         contextIdentifier: {
@@ -76,7 +75,6 @@ export async function POST(request) {
     if (!certRes.ok) throw new Error("Nie udało się pobrać certyfikatów publicznych KSeF v2.");
     const certsJson = await certRes.json();
     
-    // Pobieramy pierwszy certyfikat z listy
     const base64DerCert = certsJson[0]?.certificate;
     if (!base64DerCert) throw new Error("Brak certyfikatu w odpowiedzi KSeF v2.");
 
@@ -89,13 +87,12 @@ export async function POST(request) {
       Buffer.from(authMessage, 'utf8')
     ).toString('base64');
 
-    // 5. KSeF v2: Uwierzytelnienie za pomocą tokena (/auth/ksef-token)
+    // 5. KSeF 2.0: Uwierzytelnianie tokenem (/auth/ksef-token) z poprawną strukturą
     const authKsefRes = await fetch(`${KSEF_BASE_URL}/auth/ksef-token`, {
       method: 'POST',
       headers: { 
         'Content-Type': 'application/json',
-        'Accept': 'application/json',
-        'X-Error-Format': 'problem-details'
+        'Accept': 'application/json'
       },
       body: JSON.stringify({
         challenge: challengeToken,
@@ -112,42 +109,15 @@ export async function POST(request) {
     try { authData = JSON.parse(authText); } catch (e) { throw new Error(`Błąd uwierzytelniania JSON: ${authText.substring(0, 100)}`); }
     if (!authKsefRes.ok) throw new Error(`KSeF Auth Błąd: ${authData.title || authData.detail || authText}`);
     
-    const referenceNumber = authData.referenceNumber;
+    // W KSeF 2.0 token dostępowy do zapytań (accessToken / authenticationToken)
+    let accessToken = authData.accessToken || authData.authenticationToken || authData.referenceNumber;
 
-    // 6. Oczekiwanie / pobranie statusu i tokena sesyjnego (accessToken / authenticationToken)
-    // W KSeF v2 po wysłaniu żądania dostajemy referenceNumber, sprawdzamy status i odbieramy token dostępu
-    let accessToken = null;
-    for (let i = 0; i < 3; i++) {
-      await new Promise(res => setTimeout(res, 2000)); // Czekaj 2 sekundy na przetworzenie po stronie MF
-      
-      const statusRes = await fetch(`${KSEF_BASE_URL}/auth/${referenceNumber}`, {
-        method: 'GET',
-        headers: { 'Accept': 'application/json' }
-      });
-      
-      if (statusRes.ok) {
-        const statusData = await statusRes.json();
-        // Jeśli status gotowy, wyciągamy token
-        if (statusData.status?.code === 200 || statusData.accessToken) {
-          accessToken = statusData.accessToken || statusData.authenticationToken;
-          break;
-        }
-      }
-    }
-
-    if (!accessToken && authData.accessToken) {
-      accessToken = authData.accessToken;
-    }
-    if (!accessToken) {
-      accessToken = authData.authenticationToken || referenceNumber; // Fallback
-    }
-
-    // 7. Pobranie faktur kosztowych (API v2)
+    // 6. Pobranie faktur kosztowych (API v2)
     const dzisiaj = new Date();
     const poczatekMiesiaca = new Date(dzisiaj.getFullYear(), dzisiaj.getMonth(), 1).toISOString();
     const teraz = dzisiaj.toISOString();
 
-    const syncRes = await fetch(`${KSEF_BASE_URL}/online/Query/Invoice/Sync`, {
+    const syncRes = await fetch(`${KSEF_BASE_URL}/invoices/query/metadata`, {
       method: 'POST',
       headers: { 
         'SessionToken': accessToken, 
