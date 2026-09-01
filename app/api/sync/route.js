@@ -3,7 +3,7 @@ import { google } from 'googleapis';
 import crypto from 'crypto';
 
 // Zmień na 'https://ksef-test.mf.gov.pl/api' jeśli to środowisko testowe
-const KSEF_BASE_URL = 'https://ksef.mf.gov.pl/api';
+const KSEF_BASE_URL = 'https://ksef.mf.gov.pl/v2';
 
 export async function POST(request) {
   try {
