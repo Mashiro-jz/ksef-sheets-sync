@@ -38,16 +38,32 @@ export async function POST(request) {
       console.warn("Brak historii:", e.message);
     }
 
-    // 4. KSeF v2: Pobranie Challenge (Metoda GET w v2)
-    const challengeRes = await fetch(`${KSEF_BASE_URL}/online/Session/AuthorisationChallenge?identifier=${nipFirmy}`, {
-      method: 'GET',
-      headers: { 'Accept': 'application/json' }
+    // 4. KSeF: Pobranie Challenge (Metoda POST z prawidłową strukturą body)
+    const challengeRes = await fetch(`${KSEF_BASE_URL}/online/Session/AuthorisationChallenge`, {
+      method: 'POST',
+      headers: { 
+        'Content-Type': 'application/json',
+        'Accept': 'application/json' 
+      },
+      body: JSON.stringify({
+        contextIdentifier: {
+          type: "onip",
+          identifier: nipFirmy
+        }
+      })
     });
     
     const challengeText = await challengeRes.text();
     let challengeData;
-    try { challengeData = JSON.parse(challengeText); } catch (e) { throw new Error(`Błąd Challenge: ${challengeText.substring(0, 100)}`); }
-    if (!challengeRes.ok) throw new Error(`KSeF Odrzucił Challenge: ${challengeData.exception?.exceptionDetailList?.[0]?.exceptionMessage || challengeText}`);
+    try { 
+      challengeData = JSON.parse(challengeText); 
+    } catch (e) { 
+      throw new Error(`KSeF zwrócił HTML zamiast JSON przy Challenge. Treść: ${challengeText.substring(0, 120)}`); 
+    }
+    
+    if (!challengeRes.ok) {
+      throw new Error(`KSeF Odrzucił Challenge: ${challengeData.exception?.exceptionDetailList?.[0]?.exceptionMessage || challengeRes.statusText}`);
+    }
 
     // 5. Pobranie certyfikatu publicznego MF i konwersja
     const certRes = await fetch(`${KSEF_BASE_URL}/common/Files/PublicKey`);
@@ -67,7 +83,7 @@ export async function POST(request) {
       Buffer.from(authMessage, 'utf8')
     ).toString('base64');
 
-    // 7. Logowanie (InitToken) w v2
+    // 7. Logowanie (InitToken)
     const initSessionRes = await fetch(`${KSEF_BASE_URL}/online/Session/InitToken`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', 'Accept': 'application/json' },
@@ -83,7 +99,7 @@ export async function POST(request) {
 
     const sessionText = await initSessionRes.text();
     let sessionData;
-    try { sessionData = JSON.parse(sessionText); } catch (e) { throw new Error(`Błąd logowania: ${sessionText.substring(0, 100)}`); }
+    try { sessionData = JSON.parse(sessionText); } catch (e) { throw new Error(`Błąd logowania JSON: ${sessionText.substring(0, 100)}`); }
     if (!initSessionRes.ok) throw new Error(`KSeF InitToken Błąd: ${sessionData.exception?.exceptionDetailList?.[0]?.exceptionMessage || sessionText}`);
     
     const sessionToken = sessionData.sessionToken.token;
