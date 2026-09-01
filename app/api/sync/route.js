@@ -2,6 +2,7 @@ import { NextResponse } from 'next/server';
 import { google } from 'googleapis';
 import crypto from 'crypto';
 
+// Oficjalny bazowy adres API v2 KSeF
 const KSEF_BASE_URL = 'https://api.ksef.mf.gov.pl/v2';
 
 export async function POST(request) {
@@ -24,6 +25,7 @@ export async function POST(request) {
     });
     const sheets = google.sheets({ version: 'v4', auth });
 
+    // 1. Pobranie istniejących faktur (Deduplikacja)
     let existingInvoiceNumbers = new Set();
     try {
       const existingData = await sheets.spreadsheets.values.get({
@@ -38,12 +40,13 @@ export async function POST(request) {
       console.warn("Brak historii:", e.message);
     }
 
-    // 4. KSeF: Pobranie Challenge (Metoda POST z prawidłową strukturą body)
-    const challengeRes = await fetch(`${KSEF_BASE_URL}/online/Session/AuthorisationChallenge`, {
+    // 2. KSeF v2: Poprawny endpoint pobierania Challenge (/auth/challenge)
+    const challengeRes = await fetch(`${KSEF_BASE_URL}/auth/challenge`, {
       method: 'POST',
       headers: { 
         'Content-Type': 'application/json',
-        'Accept': 'application/json' 
+        'Accept': 'application/json',
+        'X-Error-Format': 'problem-details'
       },
       body: JSON.stringify({
         contextIdentifier: {
@@ -58,60 +61,100 @@ export async function POST(request) {
     try { 
       challengeData = JSON.parse(challengeText); 
     } catch (e) { 
-      throw new Error(`KSeF zwrócił HTML zamiast JSON przy Challenge. Treść: ${challengeText.substring(0, 120)}`); 
+      throw new Error(`KSeF v2 zwrócił HTML przy Challenge: ${challengeText.substring(0, 120)}`); 
     }
     
     if (!challengeRes.ok) {
-      throw new Error(`KSeF Odrzucił Challenge: ${challengeData.exception?.exceptionDetailList?.[0]?.exceptionMessage || challengeRes.statusText}`);
+      throw new Error(`KSeF Challenge Błąd: ${challengeData.title || challengeData.detail || challengeRes.statusText}`);
     }
 
-    // 5. Pobranie certyfikatu publicznego MF i konwersja
-    const certRes = await fetch(`${KSEF_BASE_URL}/common/Files/PublicKey`);
-    if (!certRes.ok) throw new Error("Nie udało się pobrać certyfikatu publicznego MF.");
-    const certBuffer = await certRes.arrayBuffer();
-    
-    const certBase64 = Buffer.from(certBuffer).toString('base64');
-    const publicKeyPem = `-----BEGIN CERTIFICATE-----\n${certBase64.match(/.{1,64}/g).join('\n')}\n-----END CERTIFICATE-----\n`;
-
-    // 6. Szyfrowanie tokena
     const timestamp = challengeData.timestamp;
     const challengeToken = challengeData.challenge;
-    const authMessage = `${process.env.KSEF_TOKEN}|${timestamp}`;
+
+    // 3. Pobranie certyfikatu publicznego MF dla v2
+    const certRes = await fetch(`${KSEF_BASE_URL}/security/public-key-certificates`);
+    if (!certRes.ok) throw new Error("Nie udało się pobrać certyfikatów publicznych KSeF v2.");
+    const certsJson = await certRes.json();
     
+    // Pobieramy pierwszy certyfikat z listy
+    const base64DerCert = certsJson[0]?.certificate;
+    if (!base64DerCert) throw new Error("Brak certyfikatu w odpowiedzi KSeF v2.");
+
+    const publicKeyPem = `-----BEGIN CERTIFICATE-----\n${base64DerCert.match(/.{1,64}/g).join('\n')}\n-----END CERTIFICATE-----\n`;
+
+    // 4. Szyfrowanie tokena (KSeF Token + Timestamp)
+    const authMessage = `${process.env.KSEF_TOKEN}|${timestamp}`;
     const encryptedToken = crypto.publicEncrypt(
       { key: publicKeyPem, padding: crypto.constants.RSA_PKCS1_PADDING },
       Buffer.from(authMessage, 'utf8')
     ).toString('base64');
 
-    // 7. Logowanie (InitToken)
-    const initSessionRes = await fetch(`${KSEF_BASE_URL}/online/Session/InitToken`, {
+    // 5. KSeF v2: Uwierzytelnienie za pomocą tokena (/auth/ksef-token)
+    const authKsefRes = await fetch(`${KSEF_BASE_URL}/auth/ksef-token`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json', 'Accept': 'application/json' },
+      headers: { 
+        'Content-Type': 'application/json',
+        'Accept': 'application/json',
+        'X-Error-Format': 'problem-details'
+      },
       body: JSON.stringify({
-        contextIdentifier: { type: 'onip', identifier: nipFirmy },
-        challengeReferenceNumber: challengeToken,
-        sessionToken: {
-          token: encryptedToken,
-          contextIdentifier: { type: 'onip', identifier: nipFirmy }
-        }
+        challenge: challengeToken,
+        contextIdentifier: {
+          type: "onip",
+          identifier: nipFirmy
+        },
+        encryptedToken: encryptedToken
       })
     });
 
-    const sessionText = await initSessionRes.text();
-    let sessionData;
-    try { sessionData = JSON.parse(sessionText); } catch (e) { throw new Error(`Błąd logowania JSON: ${sessionText.substring(0, 100)}`); }
-    if (!initSessionRes.ok) throw new Error(`KSeF InitToken Błąd: ${sessionData.exception?.exceptionDetailList?.[0]?.exceptionMessage || sessionText}`);
+    const authText = await authKsefRes.text();
+    let authData;
+    try { authData = JSON.parse(authText); } catch (e) { throw new Error(`Błąd uwierzytelniania JSON: ${authText.substring(0, 100)}`); }
+    if (!authKsefRes.ok) throw new Error(`KSeF Auth Błąd: ${authData.title || authData.detail || authText}`);
     
-    const sessionToken = sessionData.sessionToken.token;
+    const referenceNumber = authData.referenceNumber;
 
-    // 8. Pobranie faktur kosztowych
+    // 6. Oczekiwanie / pobranie statusu i tokena sesyjnego (accessToken / authenticationToken)
+    // W KSeF v2 po wysłaniu żądania dostajemy referenceNumber, sprawdzamy status i odbieramy token dostępu
+    let accessToken = null;
+    for (let i = 0; i < 3; i++) {
+      await new Promise(res => setTimeout(res, 2000)); // Czekaj 2 sekundy na przetworzenie po stronie MF
+      
+      const statusRes = await fetch(`${KSEF_BASE_URL}/auth/${referenceNumber}`, {
+        method: 'GET',
+        headers: { 'Accept': 'application/json' }
+      });
+      
+      if (statusRes.ok) {
+        const statusData = await statusRes.json();
+        // Jeśli status gotowy, wyciągamy token
+        if (statusData.status?.code === 200 || statusData.accessToken) {
+          accessToken = statusData.accessToken || statusData.authenticationToken;
+          break;
+        }
+      }
+    }
+
+    if (!accessToken && authData.accessToken) {
+      accessToken = authData.accessToken;
+    }
+    if (!accessToken) {
+      accessToken = authData.authenticationToken || referenceNumber; // Fallback
+    }
+
+    // 7. Pobranie faktur kosztowych (API v2)
     const dzisiaj = new Date();
     const poczatekMiesiaca = new Date(dzisiaj.getFullYear(), dzisiaj.getMonth(), 1).toISOString();
     const teraz = dzisiaj.toISOString();
 
     const syncRes = await fetch(`${KSEF_BASE_URL}/online/Query/Invoice/Sync`, {
       method: 'POST',
-      headers: { 'SessionToken': sessionToken, 'Content-Type': 'application/json', 'Accept': 'application/json' },
+      headers: { 
+        'SessionToken': accessToken, 
+        'Authorization': `Bearer ${accessToken}`,
+        'Content-Type': 'application/json', 
+        'Accept': 'application/json' 
+      },
       body: JSON.stringify({
         queryCriteria: {
           subjectType: "subject2",
@@ -126,9 +169,7 @@ export async function POST(request) {
     let syncData;
     try { syncData = JSON.parse(syncText); } catch (e) { throw new Error(`Błąd pobierania list: ${syncText.substring(0, 100)}`); }
     
-    fetch(`${KSEF_BASE_URL}/online/Session/Terminate`, { headers: { 'SessionToken': sessionToken, 'Accept': 'application/json' } }).catch(()=>{});
-
-    if (!syncRes.ok) throw new Error(`Błąd z KSeF: ${syncData.exception?.exceptionDetailList?.[0]?.exceptionMessage || syncText}`);
+    if (!syncRes.ok) throw new Error(`Błąd pobierania faktur KSeF: ${syncData.title || syncData.detail || syncText}`);
 
     const fetchedInvoices = syncData.invoiceHeaderList || [];
 
