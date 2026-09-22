@@ -1,9 +1,9 @@
-import { NextResponse } from 'next/server';
-import { google } from 'googleapis';
-import crypto from 'crypto';
+import { NextResponse } from "next/server";
+import { google } from "googleapis";
+import crypto from "crypto";
 
 // KSeF API 2.0 - produkcja
-const KSEF_BASE_URL = 'https://api.ksef.mf.gov.pl/api/v2';
+const KSEF_BASE_URL = "https://api.ksef.mf.gov.pl/api/v2";
 
 // ---------------------------------------------------------
 // Pomocnicze: parsowanie odpowiedzi KSeF
@@ -14,14 +14,26 @@ async function parseKsefResponse(response, operationName) {
   try {
     data = text ? JSON.parse(text) : {};
   } catch {
-    throw new Error(`${operationName}: KSeF zwrócił niepoprawny JSON/HTML. HTTP ${response.status}: ${text.substring(0, 300)}`);
+    throw new Error(
+      `${operationName}: KSeF zwrócił niepoprawny JSON/HTML. HTTP ${response.status}: ${text.substring(0, 300)}`,
+    );
   }
   if (!response.ok) {
-    const exceptionDetails = data?.exception?.exceptionDetailList?.map((item) => {
-      const details = item.details?.length ? ` (${item.details.join('; ')})` : '';
-      return `${item.exceptionCode}: ${item.exceptionDescription}${details}`;
-    }).join(' | ');
-    const message = exceptionDetails || data?.detail || data?.title || data?.description || text || response.statusText;
+    const exceptionDetails = data?.exception?.exceptionDetailList
+      ?.map((item) => {
+        const details = item.details?.length
+          ? ` (${item.details.join("; ")})`
+          : "";
+        return `${item.exceptionCode}: ${item.exceptionDescription}${details}`;
+      })
+      .join(" | ");
+    const message =
+      exceptionDetails ||
+      data?.detail ||
+      data?.title ||
+      data?.description ||
+      text ||
+      response.statusText;
     throw new Error(`${operationName}: ${message} [HTTP ${response.status}]`);
   }
   return data;
@@ -39,109 +51,137 @@ function sleep(ms) {
 // ---------------------------------------------------------
 async function authenticateKsef(nipFirmy) {
   const ksefToken = process.env.KSEF_TOKEN;
-  if (!ksefToken) throw new Error('Brak zmiennej środowiskowej KSEF_TOKEN.');
+  if (!ksefToken) throw new Error("Brak zmiennej środowiskowej KSEF_TOKEN.");
 
   // 1. Challenge
   const challengeRes = await fetch(`${KSEF_BASE_URL}/auth/challenge`, {
-    method: 'POST',
+    method: "POST",
     headers: {
-      'Content-Type': 'application/json',
-      'Accept': 'application/json',
-      'X-Error-Format': 'problem-details',
+      "Content-Type": "application/json",
+      Accept: "application/json",
+      "X-Error-Format": "problem-details",
     },
     body: JSON.stringify({
-      contextIdentifier: { type: 'Nip', value: nipFirmy }, // poprawne dla KSeF 2.0
+      contextIdentifier: { type: "Nip", value: nipFirmy }, // poprawne dla KSeF 2.0
     }),
   });
 
-  const challengeData = await parseKsefResponse(challengeRes, 'KSeF Challenge');
+  const challengeData = await parseKsefResponse(challengeRes, "KSeF Challenge");
   const challenge = challengeData.challenge;
   const timestampMs = challengeData.timestampMs;
 
-  if (!challenge || !timestampMs) throw new Error('KSeF Challenge: brak pola challenge lub timestampMs.');
+  if (!challenge || !timestampMs)
+    throw new Error("KSeF Challenge: brak pola challenge lub timestampMs.");
 
   // 2. Pobranie aktualnego certyfikatu MF
-  const certRes = await fetch(`${KSEF_BASE_URL}/security/public-key-certificates`, {
-    method: 'GET',
-    headers: { 'Accept': 'application/json', 'X-Error-Format': 'problem-details' },
-  });
+  const certRes = await fetch(
+    `${KSEF_BASE_URL}/security/public-key-certificates`,
+    {
+      method: "GET",
+      headers: {
+        Accept: "application/json",
+        "X-Error-Format": "problem-details",
+      },
+    },
+  );
 
-  const certsJson = await parseKsefResponse(certRes, 'KSeF Public Key Certificates');
-  const cert = certsJson.find((item) => Array.isArray(item.usage) && item.usage.includes('KsefTokenEncryption'));
+  const certsJson = await parseKsefResponse(
+    certRes,
+    "KSeF Public Key Certificates",
+  );
+  const cert = certsJson.find(
+    (item) =>
+      Array.isArray(item.usage) && item.usage.includes("KsefTokenEncryption"),
+  );
 
   if (!cert || !cert.certificate || !cert.publicKeyId) {
-    throw new Error('KSeF: nie znaleziono odpowiedniego certyfikatu (KsefTokenEncryption).');
+    throw new Error(
+      "KSeF: nie znaleziono odpowiedniego certyfikatu (KsefTokenEncryption).",
+    );
   }
 
   const base64DerCert = cert.certificate;
   const publicKeyId = cert.publicKeyId;
-  const certificateLines = base64DerCert.match(/.{1,64}/g)?.join('\n');
+  const certificateLines = base64DerCert.match(/.{1,64}/g)?.join("\n");
   const publicKeyPem = `-----BEGIN CERTIFICATE-----\n${certificateLines}\n-----END CERTIFICATE-----\n`;
 
   // 3. Zbudowanie wiadomości do szyfrowania i RSA-OAEP
   const authMessage = `${ksefToken}|${timestampMs}`;
-  const encryptedToken = crypto.publicEncrypt(
-    { key: publicKeyPem, padding: crypto.constants.RSA_PKCS1_OAEP_PADDING, oaepHash: 'sha256' },
-    Buffer.from(authMessage, 'utf8')
-  ).toString('base64');
+  const encryptedToken = crypto
+    .publicEncrypt(
+      {
+        key: publicKeyPem,
+        padding: crypto.constants.RSA_PKCS1_OAEP_PADDING,
+        oaepHash: "sha256",
+      },
+      Buffer.from(authMessage, "utf8"),
+    )
+    .toString("base64");
 
   // 4. Rozpoczęcie uwierzytelniania tokenem
   const authKsefRes = await fetch(`${KSEF_BASE_URL}/auth/ksef-token`, {
-    method: 'POST',
+    method: "POST",
     headers: {
-      'Content-Type': 'application/json',
-      'Accept': 'application/json',
-      'X-Error-Format': 'problem-details',
+      "Content-Type": "application/json",
+      Accept: "application/json",
+      "X-Error-Format": "problem-details",
     },
     body: JSON.stringify({
       challenge,
-      contextIdentifier: { type: 'Nip', value: nipFirmy },
+      contextIdentifier: { type: "Nip", value: nipFirmy },
       encryptedToken,
       publicKeyId,
     }),
   });
 
-  const authData = await parseKsefResponse(authKsefRes, 'KSeF Auth');
+  const authData = await parseKsefResponse(authKsefRes, "KSeF Auth");
   const referenceNumber = authData.referenceNumber;
   const authenticationToken = authData.authenticationToken?.token;
 
-  if (!referenceNumber || !authenticationToken) throw new Error('KSeF Auth: brak danych uwierzytelniania.');
+  if (!referenceNumber || !authenticationToken)
+    throw new Error("KSeF Auth: brak danych uwierzytelniania.");
 
   // 5. Czekamy na zakończenie uwierzytelniania
   let authStatus = null;
   for (let attempt = 1; attempt <= 20; attempt++) {
     await sleep(500);
-    const statusRes = await fetch(`${KSEF_BASE_URL}/auth/${encodeURIComponent(referenceNumber)}`, {
-      method: 'GET',
-      headers: {
-        'Accept': 'application/json',
-        'Authorization': `Bearer ${authenticationToken}`,
-        'X-Error-Format': 'problem-details',
+    const statusRes = await fetch(
+      `${KSEF_BASE_URL}/auth/${encodeURIComponent(referenceNumber)}`,
+      {
+        method: "GET",
+        headers: {
+          Accept: "application/json",
+          Authorization: `Bearer ${authenticationToken}`,
+          "X-Error-Format": "problem-details",
+        },
       },
-    });
+    );
 
-    authStatus = await parseKsefResponse(statusRes, 'KSeF Auth Status');
+    authStatus = await parseKsefResponse(statusRes, "KSeF Auth Status");
     if (authStatus?.status?.code === 200) break;
     if (authStatus?.status?.code === 100) continue;
 
-    throw new Error(`KSeF Auth Status: Kod ${authStatus?.status?.code || 'Nieznany'}.`);
+    throw new Error(
+      `KSeF Auth Status: Kod ${authStatus?.status?.code || "Nieznany"}.`,
+    );
   }
 
-  if (authStatus?.status?.code !== 200) throw new Error('KSeF Auth Status: Timeout.');
+  if (authStatus?.status?.code !== 200)
+    throw new Error("KSeF Auth Status: Timeout.");
 
   // 6. Pobranie właściwego accessToken
   const redeemRes = await fetch(`${KSEF_BASE_URL}/auth/token/redeem`, {
-    method: 'POST',
+    method: "POST",
     headers: {
-      'Accept': 'application/json',
-      'Authorization': `Bearer ${authenticationToken}`,
-      'X-Error-Format': 'problem-details',
+      Accept: "application/json",
+      Authorization: `Bearer ${authenticationToken}`,
+      "X-Error-Format": "problem-details",
     },
   });
 
-  const redeemData = await parseKsefResponse(redeemRes, 'KSeF Token Redeem');
+  const redeemData = await parseKsefResponse(redeemRes, "KSeF Token Redeem");
   const accessToken = redeemData?.accessToken?.token;
-  if (!accessToken) throw new Error('KSeF Token Redeem: brak tokena.');
+  if (!accessToken) throw new Error("KSeF Token Redeem: brak tokena.");
 
   return accessToken;
 }
@@ -155,35 +195,50 @@ export async function POST(request) {
     const { secretKey, sheetId } = body;
 
     if (secretKey !== process.env.API_SECRET_KEY) {
-      return NextResponse.json({ error: 'Odmowa dostępu. Nieprawidłowy klucz.' }, { status: 401 });
+      return NextResponse.json(
+        { error: "Odmowa dostępu. Nieprawidłowy klucz." },
+        { status: 401 },
+      );
     }
 
-    const nipFirmy = (process.env.NIP_FIRMY || '').replace(/\D/g, '');
+    const nipFirmy = (process.env.NIP_FIRMY || "").replace(/\D/g, "");
     if (nipFirmy.length !== 10) throw new Error(`NIP_FIRMY musi mieć 10 cyfr.`);
 
-    const googlePrivateKey = (process.env.GOOGLE_PRIVATE_KEY || '').replace(/\\n/g, '\n');
+    const googlePrivateKey = (process.env.GOOGLE_PRIVATE_KEY || "").replace(
+      /\\n/g,
+      "\n",
+    );
     const googleServiceAccountEmail = process.env.GOOGLE_SERVICE_ACCOUNT_EMAIL;
-    if (!googleServiceAccountEmail || !googlePrivateKey) throw new Error('Brak konfiguracji Google (Email lub Klucz).');
+    if (!googleServiceAccountEmail || !googlePrivateKey)
+      throw new Error("Brak konfiguracji Google (Email lub Klucz).");
 
     const auth = new google.auth.GoogleAuth({
-      credentials: { client_email: googleServiceAccountEmail, private_key: googlePrivateKey },
-      scopes: ['https://www.googleapis.com/auth/spreadsheets'],
+      credentials: {
+        client_email: googleServiceAccountEmail,
+        private_key: googlePrivateKey,
+      },
+      scopes: ["https://www.googleapis.com/auth/spreadsheets"],
     });
-    const sheets = google.sheets({ version: 'v4', auth });
+    const sheets = google.sheets({ version: "v4", auth });
 
     // 1. Pobranie historii z kolumny H
     let existingInvoiceNumbers = new Set();
     try {
       const existingData = await sheets.spreadsheets.values.get({
         spreadsheetId: sheetId,
-        range: 'Arkusz1!H:H',
+        range: "Arkusz1!H:H",
       });
       const rows = existingData.data.values;
       if (rows && rows.length > 0) {
-        existingInvoiceNumbers = new Set(rows.map((row) => row[0]).filter(Boolean).map((v) => String(v).trim()));
+        existingInvoiceNumbers = new Set(
+          rows
+            .map((row) => row[0])
+            .filter(Boolean)
+            .map((v) => String(v).trim()),
+        );
       }
     } catch (e) {
-      console.warn('Nie udało się pobrać historii:', e.message);
+      console.warn("Nie udało się pobrać historii:", e.message);
     }
 
     // 2. Uwierzytelnienie
@@ -193,11 +248,31 @@ export async function POST(request) {
     // ZMIANA: ZAWSZE POBIERAMY OD 1-GO DNIA POPRZEDNIEGO MIESIĄCA
     // ----------------------------------------------------------------------------------
     const dzisiaj = new Date();
-    // getMonth() - 1 cofa nas równo o jeden miesiąc (JavaScript sprytnie obsłuży zmianę roku, np. zrobienie -1 w styczniu da grudzień poprzedniego roku).
-    const poczatekPoprzedniegoMiesiaca = new Date(dzisiaj.getFullYear(), dzisiaj.getMonth() - 1, 1, 0, 0, 0, 0);
-    
+
+    // 1. dzień poprzedniego miesiąca, godzina 00:00:00
+    const poczatekPoprzedniegoMiesiaca = new Date(
+      dzisiaj.getFullYear(),
+      dzisiaj.getMonth() - 1,
+      1,
+      0,
+      0,
+      0,
+      0,
+    );
     const poczatekOkresuISO = poczatekPoprzedniegoMiesiaca.toISOString();
-    const terazISO = dzisiaj.toISOString();
+
+    // Ostatni dzień bieżącego miesiąca, godzina 23:59:59 (np. 30 września, 31 października)
+    // Trik: wpisanie '0' jako dnia przeskakuje na ostatni dzień danego miesiąca
+    const koniecObecnegoMiesiaca = new Date(
+      dzisiaj.getFullYear(),
+      dzisiaj.getMonth() + 1,
+      0,
+      23,
+      59,
+      59,
+      999,
+    );
+    const terazISO = koniecObecnegoMiesiaca.toISOString();
 
     // 3. Pobranie faktur
     const allInvoices = [];
@@ -207,25 +282,30 @@ export async function POST(request) {
     while (hasMore) {
       const url = `${KSEF_BASE_URL}/invoices/query/metadata?pageSize=250&pageOffset=${pageOffset}&sortOrder=Asc`;
       const syncRes = await fetch(url, {
-        method: 'POST',
+        method: "POST",
         headers: {
-          'Accept': 'application/json',
-          'Content-Type': 'application/json',
-          'Authorization': `Bearer ${accessToken}`,
-          'X-Error-Format': 'problem-details',
+          Accept: "application/json",
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${accessToken}`,
+          "X-Error-Format": "problem-details",
         },
         body: JSON.stringify({
-          subjectType: 'Subject2',
+          subjectType: "Subject2",
           dateRange: {
-            dateType: 'Invoicing',
+            dateType: "Invoicing",
             from: poczatekOkresuISO,
             to: terazISO,
           },
         }),
       });
 
-      const syncData = await parseKsefResponse(syncRes, 'KSeF Invoice Metadata');
-      const invoices = Array.isArray(syncData.invoices) ? syncData.invoices : [];
+      const syncData = await parseKsefResponse(
+        syncRes,
+        "KSeF Invoice Metadata",
+      );
+      const invoices = Array.isArray(syncData.invoices)
+        ? syncData.invoices
+        : [];
       allInvoices.push(...invoices);
 
       hasMore = syncData.hasMore === true;
@@ -234,15 +314,30 @@ export async function POST(request) {
 
     // 4. Formatowanie nowych faktur i deduplikacja (Mapowanie od Kolumny B)
     const newInvoicesToAppend = [];
-    const nazwyMiesiecy = ["01 (STY)", "02 (LUT)", "03 (MAR)", "04 (KWI)", "05 (MAJ)", "06 (CZE)", "07 (LIP)", "08 (SIE)", "09 (WRZ)", "10 (PAŹ)", "11 (LIS)", "12 (GRU)"];
+    const nazwyMiesiecy = [
+      "01 (STY)",
+      "02 (LUT)",
+      "03 (MAR)",
+      "04 (KWI)",
+      "05 (MAJ)",
+      "06 (CZE)",
+      "07 (LIP)",
+      "08 (SIE)",
+      "09 (WRZ)",
+      "10 (PAŹ)",
+      "11 (LIS)",
+      "12 (GRU)",
+    ];
 
     for (const inv of allInvoices) {
-      const invoiceNumber = inv.invoiceNumber ? String(inv.invoiceNumber).trim() : '';
+      const invoiceNumber = inv.invoiceNumber
+        ? String(inv.invoiceNumber).trim()
+        : "";
       if (!invoiceNumber || existingInvoiceNumbers.has(invoiceNumber)) continue;
 
       // Miesiąc (na podstawie issueDate)
-      const dataFaktury = inv.issueDate || '';
-      let miesiacFormat = '';
+      const dataFaktury = inv.issueDate || "";
+      let miesiacFormat = "";
       if (dataFaktury.length >= 7) {
         const miesiacNum = parseInt(dataFaktury.substring(5, 7), 10);
         if (!isNaN(miesiacNum) && miesiacNum >= 1 && miesiacNum <= 12) {
@@ -251,25 +346,32 @@ export async function POST(request) {
       }
 
       // Kwota
-      const grossAmount = typeof inv.grossAmount === 'number' ? inv.grossAmount : parseFloat(inv.grossAmount || 0);
-      const kwotaBrutto = Number.isFinite(grossAmount) ? grossAmount.toFixed(2).replace('.', ',') : '0,00';
+      const grossAmount =
+        typeof inv.grossAmount === "number"
+          ? inv.grossAmount
+          : parseFloat(inv.grossAmount || 0);
+      const kwotaBrutto = Number.isFinite(grossAmount)
+        ? grossAmount.toFixed(2).replace(".", ",")
+        : "0,00";
 
       // Kontrahent
-      const nazwaWydatku = inv.seller?.name || inv.seller?.nip || 'Brak nazwy';
+      const nazwaWydatku = inv.seller?.name || inv.seller?.nip || "Brak nazwy";
 
-      // Uwaga! Pomijamy kolumnę A w JSON-ie i wrzucamy dane prosto od kolumny B.
+      // Pomijamy kolumnę A w JSON-ie i wrzucamy dane prosto od kolumny B.
       // Apostrof ' przed datą wymusza format tekstowy.
       newInvoicesToAppend.push([
-        miesiacFormat,      // B: miesiac
-        `'${dataFaktury}`,  // C: data
-        '',                 // D: Konto kosztowe
-        '',                 // E: Subkonto
-        nazwaWydatku,       // F: Nazwa wydatku
-        kwotaBrutto,        // G: Kwota brutto
-        invoiceNumber,      // H: numer faktury
-        'przelew',          // I: sposób płatności
-        'Faktura jest',     // J: Faktura / paragon
-        '', '', ''          // K, L, M
+        miesiacFormat, // B: miesiac
+        `'${dataFaktury}`, // C: data
+        "", // D: Konto kosztowe
+        "", // E: Subkonto
+        nazwaWydatku, // F: Nazwa wydatku
+        kwotaBrutto, // G: Kwota brutto
+        invoiceNumber, // H: numer faktury
+        "przelew", // I: sposób płatności
+        "Faktura jest", // J: Faktura / paragon
+        "",
+        "",
+        "", // K, L, M
       ]);
 
       existingInvoiceNumbers.add(invoiceNumber);
@@ -279,9 +381,9 @@ export async function POST(request) {
     if (newInvoicesToAppend.length > 0) {
       await sheets.spreadsheets.values.append({
         spreadsheetId: sheetId,
-        range: 'Arkusz1!B:M', // Wrzucamy dane sztywno począwszy od kolumny B
-        valueInputOption: 'USER_ENTERED',
-        insertDataOption: 'INSERT_ROWS',
+        range: "Arkusz1!B:M",
+        valueInputOption: "USER_ENTERED",
+        insertDataOption: "INSERT_ROWS",
         requestBody: { values: newInvoicesToAppend },
       });
     }
@@ -292,9 +394,11 @@ export async function POST(request) {
       fetched: allInvoices.length,
       message: `Znaleziono faktur (od ubiegłego miesiąca): ${allInvoices.length}. Dodano nowych: ${newInvoicesToAppend.length}.`,
     });
-
   } catch (error) {
-    console.error('Wystąpił błąd krytyczny:', error);
-    return NextResponse.json({ error: error instanceof Error ? error.message : String(error) }, { status: 500 });
+    console.error("Wystąpił błąd krytyczny:", error);
+    return NextResponse.json(
+      { error: error instanceof Error ? error.message : String(error) },
+      { status: 500 },
+    );
   }
 }
