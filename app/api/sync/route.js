@@ -21,8 +21,8 @@ async function parseKsefResponse(response, operationName) {
     throw new Error(
       `${operationName}: KSeF zwrócił niepoprawny JSON/HTML. HTTP ${response.status}: ${text.substring(
         0,
-        500
-      )}`
+        500,
+      )}`,
     );
   }
 
@@ -45,9 +45,7 @@ async function parseKsefResponse(response, operationName) {
       text ||
       response.statusText;
 
-    throw new Error(
-      `${operationName}: ${message} [HTTP ${response.status}]`
-    );
+    throw new Error(`${operationName}: ${message} [HTTP ${response.status}]`);
   }
 
   return data;
@@ -78,9 +76,7 @@ function normalizeAmount(value) {
     return "";
   }
 
-  const normalized = String(value)
-    .trim()
-    .replace(",", ".");
+  const normalized = String(value).trim().replace(",", ".");
 
   const number = Number(normalized);
 
@@ -129,20 +125,28 @@ function createLegacyKey({
 //
 // W K i L nadal przechowujemy dane techniczne KSeF.
 // =========================================================
+// =========================================================
+// Ukrywanie kolumn, których pracownik nie powinien widzieć
+// =========================================================
 async function hideNonEssentialColumns(sheets, sheetId) {
   const spreadsheet = await sheets.spreadsheets.get({
     spreadsheetId: sheetId,
     fields: "sheets.properties",
   });
 
-  const sheet = spreadsheet.data.sheets?.find(
-    (item) => item.properties?.title === "Arkusz1"
-  );
+  // Zabezpieczenie: szuka "Arkusz1" ignorując spacje, a jeśli nie znajdzie, bierze po prostu pierwszy arkusz
+  const sheet =
+    spreadsheet.data.sheets?.find(
+      (item) => item.properties?.title?.trim() === "Arkusz1",
+    ) || spreadsheet.data.sheets?.[0];
 
-  if (!sheet?.properties?.sheetId) {
-    throw new Error(
-      "Nie znaleziono arkusza 'Arkusz1'."
-    );
+  // POPRAWKA BŁĘDU: sheetId dla pierwszego arkusza wynosi 0, co w JS jest traktowane jako "fałsz".
+  // Musimy jawnie sprawdzić, czy wartość jest undefined lub null.
+  if (
+    sheet?.properties?.sheetId === undefined ||
+    sheet?.properties?.sheetId === null
+  ) {
+    throw new Error("Nie znaleziono żadnego arkusza do ukrycia kolumn.");
   }
 
   const numericSheetId = sheet.properties.sheetId;
@@ -210,44 +214,34 @@ async function authenticateKsef(nipFirmy) {
   const ksefToken = process.env.KSEF_TOKEN;
 
   if (!ksefToken) {
-    throw new Error(
-      "Brak zmiennej środowiskowej KSEF_TOKEN."
-    );
+    throw new Error("Brak zmiennej środowiskowej KSEF_TOKEN.");
   }
 
   // -------------------------------------------------------
   // 1. Challenge
   // -------------------------------------------------------
-  const challengeRes = await fetch(
-    `${KSEF_BASE_URL}/auth/challenge`,
-    {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        Accept: "application/json",
-        "X-Error-Format": "problem-details",
+  const challengeRes = await fetch(`${KSEF_BASE_URL}/auth/challenge`, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      Accept: "application/json",
+      "X-Error-Format": "problem-details",
+    },
+    body: JSON.stringify({
+      contextIdentifier: {
+        type: "Nip",
+        value: nipFirmy,
       },
-      body: JSON.stringify({
-        contextIdentifier: {
-          type: "Nip",
-          value: nipFirmy,
-        },
-      }),
-    }
-  );
+    }),
+  });
 
-  const challengeData = await parseKsefResponse(
-    challengeRes,
-    "KSeF Challenge"
-  );
+  const challengeData = await parseKsefResponse(challengeRes, "KSeF Challenge");
 
   const challenge = challengeData.challenge;
   const timestampMs = challengeData.timestampMs;
 
   if (!challenge || !timestampMs) {
-    throw new Error(
-      "KSeF Challenge: brak pola challenge lub timestampMs."
-    );
+    throw new Error("KSeF Challenge: brak pola challenge lub timestampMs.");
   }
 
   // -------------------------------------------------------
@@ -261,32 +255,29 @@ async function authenticateKsef(nipFirmy) {
         Accept: "application/json",
         "X-Error-Format": "problem-details",
       },
-    }
+    },
   );
 
   const certsJson = await parseKsefResponse(
     certRes,
-    "KSeF Public Key Certificates"
+    "KSeF Public Key Certificates",
   );
 
   const cert = certsJson.find(
     (item) =>
-      Array.isArray(item.usage) &&
-      item.usage.includes("KsefTokenEncryption")
+      Array.isArray(item.usage) && item.usage.includes("KsefTokenEncryption"),
   );
 
   if (!cert || !cert.certificate || !cert.publicKeyId) {
     throw new Error(
-      "KSeF: nie znaleziono odpowiedniego certyfikatu (KsefTokenEncryption)."
+      "KSeF: nie znaleziono odpowiedniego certyfikatu (KsefTokenEncryption).",
     );
   }
 
   const base64DerCert = cert.certificate;
   const publicKeyId = cert.publicKeyId;
 
-  const certificateLines = base64DerCert
-    .match(/.{1,64}/g)
-    ?.join("\n");
+  const certificateLines = base64DerCert.match(/.{1,64}/g)?.join("\n");
 
   const publicKeyPem = `-----BEGIN CERTIFICATE-----
 ${certificateLines}
@@ -304,47 +295,38 @@ ${certificateLines}
         padding: crypto.constants.RSA_PKCS1_OAEP_PADDING,
         oaepHash: "sha256",
       },
-      Buffer.from(authMessage, "utf8")
+      Buffer.from(authMessage, "utf8"),
     )
     .toString("base64");
 
   // -------------------------------------------------------
   // 4. Rozpoczęcie uwierzytelniania tokenem
   // -------------------------------------------------------
-  const authKsefRes = await fetch(
-    `${KSEF_BASE_URL}/auth/ksef-token`,
-    {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        Accept: "application/json",
-        "X-Error-Format": "problem-details",
+  const authKsefRes = await fetch(`${KSEF_BASE_URL}/auth/ksef-token`, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      Accept: "application/json",
+      "X-Error-Format": "problem-details",
+    },
+    body: JSON.stringify({
+      challenge,
+      contextIdentifier: {
+        type: "Nip",
+        value: nipFirmy,
       },
-      body: JSON.stringify({
-        challenge,
-        contextIdentifier: {
-          type: "Nip",
-          value: nipFirmy,
-        },
-        encryptedToken,
-        publicKeyId,
-      }),
-    }
-  );
+      encryptedToken,
+      publicKeyId,
+    }),
+  });
 
-  const authData = await parseKsefResponse(
-    authKsefRes,
-    "KSeF Auth"
-  );
+  const authData = await parseKsefResponse(authKsefRes, "KSeF Auth");
 
   const referenceNumber = authData.referenceNumber;
-  const authenticationToken =
-    authData.authenticationToken?.token;
+  const authenticationToken = authData.authenticationToken?.token;
 
   if (!referenceNumber || !authenticationToken) {
-    throw new Error(
-      "KSeF Auth: brak danych uwierzytelniania."
-    );
+    throw new Error("KSeF Auth: brak danych uwierzytelniania.");
   }
 
   // -------------------------------------------------------
@@ -356,9 +338,7 @@ ${certificateLines}
     await sleep(500);
 
     const statusRes = await fetch(
-      `${KSEF_BASE_URL}/auth/${encodeURIComponent(
-        referenceNumber
-      )}`,
+      `${KSEF_BASE_URL}/auth/${encodeURIComponent(referenceNumber)}`,
       {
         method: "GET",
         headers: {
@@ -366,13 +346,10 @@ ${certificateLines}
           Authorization: `Bearer ${authenticationToken}`,
           "X-Error-Format": "problem-details",
         },
-      }
+      },
     );
 
-    authStatus = await parseKsefResponse(
-      statusRes,
-      "KSeF Auth Status"
-    );
+    authStatus = await parseKsefResponse(statusRes, "KSeF Auth Status");
 
     if (authStatus?.status?.code === 200) {
       break;
@@ -383,45 +360,32 @@ ${certificateLines}
     }
 
     throw new Error(
-      `KSeF Auth Status: Kod ${
-        authStatus?.status?.code || "Nieznany"
-      }.`
+      `KSeF Auth Status: Kod ${authStatus?.status?.code || "Nieznany"}.`,
     );
   }
 
   if (authStatus?.status?.code !== 200) {
-    throw new Error(
-      "KSeF Auth Status: Timeout."
-    );
+    throw new Error("KSeF Auth Status: Timeout.");
   }
 
   // -------------------------------------------------------
   // 6. Pobranie właściwego accessToken
   // -------------------------------------------------------
-  const redeemRes = await fetch(
-    `${KSEF_BASE_URL}/auth/token/redeem`,
-    {
-      method: "POST",
-      headers: {
-        Accept: "application/json",
-        Authorization: `Bearer ${authenticationToken}`,
-        "X-Error-Format": "problem-details",
-      },
-    }
-  );
+  const redeemRes = await fetch(`${KSEF_BASE_URL}/auth/token/redeem`, {
+    method: "POST",
+    headers: {
+      Accept: "application/json",
+      Authorization: `Bearer ${authenticationToken}`,
+      "X-Error-Format": "problem-details",
+    },
+  });
 
-  const redeemData = await parseKsefResponse(
-    redeemRes,
-    "KSeF Token Redeem"
-  );
+  const redeemData = await parseKsefResponse(redeemRes, "KSeF Token Redeem");
 
-  const accessToken =
-    redeemData?.accessToken?.token;
+  const accessToken = redeemData?.accessToken?.token;
 
   if (!accessToken) {
-    throw new Error(
-      "KSeF Token Redeem: brak tokena."
-    );
+    throw new Error("KSeF Token Redeem: brak tokena.");
   }
 
   return accessToken;
@@ -442,18 +406,14 @@ export async function POST(request) {
     // =====================================================
     // 2. Autoryzacja naszego API
     // =====================================================
-    if (
-      secretKey !==
-      process.env.API_SECRET_KEY
-    ) {
+    if (secretKey !== process.env.API_SECRET_KEY) {
       return NextResponse.json(
         {
-          error:
-            "Odmowa dostępu. Nieprawidłowy klucz.",
+          error: "Odmowa dostępu. Nieprawidłowy klucz.",
         },
         {
           status: 401,
-        }
+        },
       );
     }
 
@@ -464,52 +424,39 @@ export async function POST(request) {
         },
         {
           status: 400,
-        }
+        },
       );
     }
 
     // =====================================================
     // 3. NIP firmy
     // =====================================================
-    const nipFirmy = (
-      process.env.NIP_FIRMY || ""
-    ).replace(/\D/g, "");
+    const nipFirmy = (process.env.NIP_FIRMY || "").replace(/\D/g, "");
 
     if (nipFirmy.length !== 10) {
-      throw new Error(
-        "NIP_FIRMY musi mieć 10 cyfr."
-      );
+      throw new Error("NIP_FIRMY musi mieć 10 cyfr.");
     }
 
     // =====================================================
     // 4. Konfiguracja Google Sheets
     // =====================================================
-    const googlePrivateKey = (
-      process.env.GOOGLE_PRIVATE_KEY || ""
-    ).replace(/\\n/g, "\n");
+    const googlePrivateKey = (process.env.GOOGLE_PRIVATE_KEY || "").replace(
+      /\\n/g,
+      "\n",
+    );
 
-    const googleServiceAccountEmail =
-      process.env.GOOGLE_SERVICE_ACCOUNT_EMAIL;
+    const googleServiceAccountEmail = process.env.GOOGLE_SERVICE_ACCOUNT_EMAIL;
 
-    if (
-      !googleServiceAccountEmail ||
-      !googlePrivateKey
-    ) {
-      throw new Error(
-        "Brak konfiguracji Google (Email lub Klucz)."
-      );
+    if (!googleServiceAccountEmail || !googlePrivateKey) {
+      throw new Error("Brak konfiguracji Google (Email lub Klucz).");
     }
 
     const auth = new google.auth.GoogleAuth({
       credentials: {
-        client_email:
-          googleServiceAccountEmail,
-        private_key:
-          googlePrivateKey,
+        client_email: googleServiceAccountEmail,
+        private_key: googlePrivateKey,
       },
-      scopes: [
-        "https://www.googleapis.com/auth/spreadsheets",
-      ],
+      scopes: ["https://www.googleapis.com/auth/spreadsheets"],
     });
 
     const sheets = google.sheets({
@@ -527,26 +474,19 @@ export async function POST(request) {
     // K = ksefNumber
     // L = permanentStorageDate
     // =====================================================
-    const existingKsefNumbers =
-      new Set();
+    const existingKsefNumbers = new Set();
 
-    const existingLegacyKeys =
-      new Set();
+    const existingLegacyKeys = new Set();
 
-    let lastPermanentStorageDate =
-      null;
+    let lastPermanentStorageDate = null;
 
     try {
-      const existingData =
-        await sheets.spreadsheets.values.get(
-          {
-            spreadsheetId: sheetId,
-            range: "Arkusz1!C:L",
-          }
-        );
+      const existingData = await sheets.spreadsheets.values.get({
+        spreadsheetId: sheetId,
+        range: "Arkusz1!C:L",
+      });
 
-      const rows =
-        existingData.data.values || [];
+      const rows = existingData.data.values || [];
 
       for (const row of rows) {
         /*
@@ -564,165 +504,116 @@ export async function POST(request) {
           row[9] = L = permanentStorageDate
         */
 
-        const issueDate = String(
-          row[0] || ""
-        )
+        const issueDate = String(row[0] || "")
           .trim()
           .replace(/^'/, "");
 
-        const sellerName = String(
-          row[3] || ""
-        ).trim();
+        const sellerName = String(row[3] || "").trim();
 
-        const grossAmount =
-          row[4];
+        const grossAmount = row[4];
 
-        const invoiceNumber =
-          String(row[5] || "").trim();
+        const invoiceNumber = String(row[5] || "").trim();
 
-        const ksefNumber =
-          String(row[8] || "").trim();
+        const ksefNumber = String(row[8] || "").trim();
 
-        const permanentStorageDate =
-          String(row[9] || "").trim();
+        const permanentStorageDate = String(row[9] || "").trim();
 
         // -------------------------------------------------
         // Główny identyfikator KSeF
         // -------------------------------------------------
         if (ksefNumber) {
-          existingKsefNumbers.add(
-            ksefNumber
-          );
+          existingKsefNumbers.add(ksefNumber);
         }
 
         // -------------------------------------------------
         // Zabezpieczenie starych rekordów
         // -------------------------------------------------
-        if (
-          invoiceNumber &&
-          issueDate
-        ) {
-          const legacyKey =
-            createLegacyKey({
-              invoiceNumber,
-              issueDate,
-              sellerName,
-              grossAmount,
-            });
+        if (invoiceNumber && issueDate) {
+          const legacyKey = createLegacyKey({
+            invoiceNumber,
+            issueDate,
+            sellerName,
+            grossAmount,
+          });
 
-          existingLegacyKeys.add(
-            legacyKey
-          );
+          existingLegacyKeys.add(legacyKey);
         }
 
         // -------------------------------------------------
         // Ostatnia data PermanentStorage
         // -------------------------------------------------
-        if (
-          permanentStorageDate
-        ) {
-          const parsedDate =
-            new Date(
-              permanentStorageDate
-            );
+        if (permanentStorageDate) {
+          const parsedDate = new Date(permanentStorageDate);
 
-          if (
-            !Number.isNaN(
-              parsedDate.getTime()
-            )
-          ) {
+          if (!Number.isNaN(parsedDate.getTime())) {
             if (
               !lastPermanentStorageDate ||
-              parsedDate >
-                lastPermanentStorageDate
+              parsedDate > lastPermanentStorageDate
             ) {
-              lastPermanentStorageDate =
-                parsedDate;
+              lastPermanentStorageDate = parsedDate;
             }
           }
         }
       }
     } catch (e) {
-      console.warn(
-        "Nie udało się pobrać historii arkusza:",
-        e.message
-      );
+      console.warn("Nie udało się pobrać historii arkusza:", e.message);
     }
 
     // =====================================================
     // 6. Uwierzytelnienie KSeF
     // =====================================================
-    const accessToken =
-      await authenticateKsef(
-        nipFirmy
-      );
+    const accessToken = await authenticateKsef(nipFirmy);
 
     // =====================================================
     // 7. Ustalenie początku synchronizacji
     // =====================================================
-    const teraz =
-      new Date();
+    const teraz = new Date();
 
     let poczatekOkresu;
 
-    if (
-      lastPermanentStorageDate
-    ) {
-      poczatekOkresu =
-        lastPermanentStorageDate;
+    if (lastPermanentStorageDate) {
+      poczatekOkresu = lastPermanentStorageDate;
 
       console.log(
         "Synchronizacja przyrostowa od:",
-        poczatekOkresu.toISOString()
+        poczatekOkresu.toISOString(),
       );
     } else {
       // Pierwsza synchronizacja:
       // pierwszy dzień poprzedniego miesiąca
-      poczatekOkresu =
-        new Date(
-          teraz.getFullYear(),
-          teraz.getMonth() - 1,
-          1,
-          0,
-          0,
-          0,
-          0
-        );
+      poczatekOkresu = new Date(
+        teraz.getFullYear(),
+        teraz.getMonth() - 1,
+        1,
+        0,
+        0,
+        0,
+        0,
+      );
 
       console.log(
         "Brak poprzedniej daty synchronizacji.",
         "Pierwszy import od:",
-        poczatekOkresu.toISOString()
+        poczatekOkresu.toISOString(),
       );
     }
 
     // =====================================================
     // Maksymalnie 3 miesiące zakresu
     // =====================================================
-    const trzyMiesiaceTemu =
-      new Date(teraz);
+    const trzyMiesiaceTemu = new Date(teraz);
 
-    trzyMiesiaceTemu.setMonth(
-      trzyMiesiaceTemu.getMonth() - 3
-    );
+    trzyMiesiaceTemu.setMonth(trzyMiesiaceTemu.getMonth() - 3);
 
-    if (
-      poczatekOkresu <
-      trzyMiesiaceTemu
-    ) {
-      console.warn(
-        "Ostatnia synchronizacja jest starsza niż 3 miesiące."
-      );
+    if (poczatekOkresu < trzyMiesiaceTemu) {
+      console.warn("Ostatnia synchronizacja jest starsza niż 3 miesiące.");
 
-      poczatekOkresu =
-        trzyMiesiaceTemu;
+      poczatekOkresu = trzyMiesiaceTemu;
     }
 
-    let fromISO =
-      poczatekOkresu.toISOString();
+    let fromISO = poczatekOkresu.toISOString();
 
-    const toISO =
-      teraz.toISOString();
+    const toISO = teraz.toISOString();
 
     // =====================================================
     // 8. Pobieranie faktur z KSeF
@@ -739,9 +630,7 @@ export async function POST(request) {
       safetyCounter++;
 
       if (safetyCounter > 1000) {
-        throw new Error(
-          "KSeF: przekroczono limit stron synchronizacji."
-        );
+        throw new Error("KSeF: przekroczono limit stron synchronizacji.");
       }
 
       const url =
@@ -750,75 +639,56 @@ export async function POST(request) {
         `&pageOffset=${pageOffset}` +
         `&sortOrder=Asc`;
 
-      const syncRes =
-        await fetch(url, {
-          method: "POST",
-          headers: {
-            Accept:
-              "application/json",
-            "Content-Type":
-              "application/json",
-            Authorization:
-              `Bearer ${accessToken}`,
-            "X-Error-Format":
-              "problem-details",
+      const syncRes = await fetch(url, {
+        method: "POST",
+        headers: {
+          Accept: "application/json",
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${accessToken}`,
+          "X-Error-Format": "problem-details",
+        },
+        body: JSON.stringify({
+          subjectType: "Subject2",
+
+          dateRange: {
+            dateType: "PermanentStorage",
+
+            from: fromISO,
+
+            to: toISO,
+
+            restrictToPermanentStorageHwmDate: true,
           },
-          body: JSON.stringify({
-            subjectType:
-              "Subject2",
+        }),
+      });
 
-            dateRange: {
-              dateType:
-                "PermanentStorage",
-
-              from: fromISO,
-
-              to: toISO,
-
-              restrictToPermanentStorageHwmDate:
-                true,
-            },
-          }),
-        });
-
-      const syncData =
-        await parseKsefResponse(
-          syncRes,
-          "KSeF Invoice Metadata"
-        );
-
-      const invoices =
-        Array.isArray(
-          syncData.invoices
-        )
-          ? syncData.invoices
-          : [];
-
-      allInvoices.push(
-        ...invoices
+      const syncData = await parseKsefResponse(
+        syncRes,
+        "KSeF Invoice Metadata",
       );
 
-      hasMore =
-        syncData.hasMore === true;
+      const invoices = Array.isArray(syncData.invoices)
+        ? syncData.invoices
+        : [];
 
-      isTruncated =
-        syncData.isTruncated === true;
+      allInvoices.push(...invoices);
+
+      hasMore = syncData.hasMore === true;
+
+      isTruncated = syncData.isTruncated === true;
 
       console.log(
         `KSeF: pobrano stronę. ` +
           `offset=${pageOffset}, ` +
           `faktur=${invoices.length}, ` +
           `hasMore=${hasMore}, ` +
-          `isTruncated=${isTruncated}`
+          `isTruncated=${isTruncated}`,
       );
 
       // ---------------------------------------------------
       // Kolejna strona
       // ---------------------------------------------------
-      if (
-        hasMore &&
-        !isTruncated
-      ) {
+      if (hasMore && !isTruncated) {
         pageOffset += 250;
         continue;
       }
@@ -826,33 +696,22 @@ export async function POST(request) {
       // ---------------------------------------------------
       // Wynik obcięty
       // ---------------------------------------------------
-      if (
-        hasMore &&
-        isTruncated
-      ) {
-        const lastInvoice =
-          invoices[
-            invoices.length - 1
-          ];
+      if (hasMore && isTruncated) {
+        const lastInvoice = invoices[invoices.length - 1];
 
-        const lastDate =
-          lastInvoice?.permanentStorageDate;
+        const lastDate = lastInvoice?.permanentStorageDate;
 
         if (!lastDate) {
           throw new Error(
-            "KSeF: wynik jest ucięty, ale ostatnia faktura nie ma permanentStorageDate."
+            "KSeF: wynik jest ucięty, ale ostatnia faktura nie ma permanentStorageDate.",
           );
         }
 
-        fromISO =
-          lastDate;
+        fromISO = lastDate;
 
         pageOffset = 0;
 
-        console.log(
-          "KSeF: wynik ucięty. Kontynuuję od:",
-          fromISO
-        );
+        console.log("KSeF: wynik ucięty. Kontynuuję od:", fromISO);
 
         continue;
       }
@@ -863,8 +722,7 @@ export async function POST(request) {
     // =====================================================
     // 9. Deduplikacja i przygotowanie danych
     // =====================================================
-    const newInvoicesToAppend =
-      [];
+    const newInvoicesToAppend = [];
 
     const nazwyMiesiecy = [
       "01 (STY)",
@@ -881,60 +739,36 @@ export async function POST(request) {
       "12 (GRU)",
     ];
 
-    const seenKsefNumbers =
-      new Set();
+    const seenKsefNumbers = new Set();
 
-    const seenLegacyKeys =
-      new Set();
+    const seenLegacyKeys = new Set();
 
     for (const inv of allInvoices) {
       // ---------------------------------------------------
       // Dane faktury
       // ---------------------------------------------------
-      const ksefNumber =
-        inv.ksefNumber
-          ? String(
-              inv.ksefNumber
-            ).trim()
-          : "";
+      const ksefNumber = inv.ksefNumber ? String(inv.ksefNumber).trim() : "";
 
-      const invoiceNumber =
-        inv.invoiceNumber
-          ? String(
-              inv.invoiceNumber
-            ).trim()
-          : "";
+      const invoiceNumber = inv.invoiceNumber
+        ? String(inv.invoiceNumber).trim()
+        : "";
 
-      const issueDate =
-        inv.issueDate
-          ? String(
-              inv.issueDate
-            ).trim()
-          : "";
+      const issueDate = inv.issueDate ? String(inv.issueDate).trim() : "";
 
-      const permanentStorageDate =
-        inv.permanentStorageDate
-          ? String(
-              inv.permanentStorageDate
-            ).trim()
-          : "";
+      const permanentStorageDate = inv.permanentStorageDate
+        ? String(inv.permanentStorageDate).trim()
+        : "";
 
-      const sellerName =
-        inv.seller?.name ||
-        inv.seller?.nip ||
-        "Brak nazwy";
+      const sellerName = inv.seller?.name || inv.seller?.nip || "Brak nazwy";
 
       // ---------------------------------------------------
       // Bez tych danych nie możemy poprawnie zapisać
       // faktury.
       // ---------------------------------------------------
-      if (
-        !ksefNumber ||
-        !invoiceNumber
-      ) {
+      if (!ksefNumber || !invoiceNumber) {
         console.warn(
           "Pominięto fakturę bez ksefNumber lub invoiceNumber:",
-          inv
+          inv,
         );
 
         continue;
@@ -943,19 +777,11 @@ export async function POST(request) {
       // ---------------------------------------------------
       // 1. Deduplikacja po ksefNumber
       // ---------------------------------------------------
-      if (
-        existingKsefNumbers.has(
-          ksefNumber
-        )
-      ) {
+      if (existingKsefNumbers.has(ksefNumber)) {
         continue;
       }
 
-      if (
-        seenKsefNumbers.has(
-          ksefNumber
-        )
-      ) {
+      if (seenKsefNumbers.has(ksefNumber)) {
         continue;
       }
 
@@ -963,37 +789,25 @@ export async function POST(request) {
       // 2. Kwota
       // ---------------------------------------------------
       const grossAmount =
-        typeof inv.grossAmount ===
-        "number"
+        typeof inv.grossAmount === "number"
           ? inv.grossAmount
-          : parseFloat(
-              inv.grossAmount || 0
-            );
+          : parseFloat(inv.grossAmount || 0);
 
       // ---------------------------------------------------
       // 3. Zabezpieczenie starych danych
       // ---------------------------------------------------
-      const legacyKey =
-        createLegacyKey({
-          invoiceNumber,
-          issueDate,
-          sellerName,
-          grossAmount,
-        });
+      const legacyKey = createLegacyKey({
+        invoiceNumber,
+        issueDate,
+        sellerName,
+        grossAmount,
+      });
 
-      if (
-        existingLegacyKeys.has(
-          legacyKey
-        )
-      ) {
+      if (existingLegacyKeys.has(legacyKey)) {
         continue;
       }
 
-      if (
-        seenLegacyKeys.has(
-          legacyKey
-        )
-      ) {
+      if (seenLegacyKeys.has(legacyKey)) {
         continue;
       }
 
@@ -1002,43 +816,20 @@ export async function POST(request) {
       // ---------------------------------------------------
       let miesiacFormat = "";
 
-      if (
-        issueDate.length >= 7
-      ) {
-        const miesiacNum =
-          parseInt(
-            issueDate.substring(
-              5,
-              7
-            ),
-            10
-          );
+      if (issueDate.length >= 7) {
+        const miesiacNum = parseInt(issueDate.substring(5, 7), 10);
 
-        if (
-          !isNaN(
-            miesiacNum
-          ) &&
-          miesiacNum >= 1 &&
-          miesiacNum <= 12
-        ) {
-          miesiacFormat =
-            nazwyMiesiecy[
-              miesiacNum - 1
-            ];
+        if (!isNaN(miesiacNum) && miesiacNum >= 1 && miesiacNum <= 12) {
+          miesiacFormat = nazwyMiesiecy[miesiacNum - 1];
         }
       }
 
       // ---------------------------------------------------
       // 5. Kwota brutto
       // ---------------------------------------------------
-      const kwotaBrutto =
-        Number.isFinite(
-          grossAmount
-        )
-          ? grossAmount
-              .toFixed(2)
-              .replace(".", ",")
-          : "0,00";
+      const kwotaBrutto = Number.isFinite(grossAmount)
+        ? grossAmount.toFixed(2).replace(".", ",")
+        : "0,00";
 
       // ---------------------------------------------------
       // 6. Dodanie rekordu
@@ -1057,66 +848,49 @@ export async function POST(request) {
       // M = puste
       // ---------------------------------------------------
       newInvoicesToAppend.push([
-        miesiacFormat,        // B
-        `'${issueDate}`,      // C
-        "",                   // D
-        "",                   // E
-        sellerName,           // F
-        kwotaBrutto,          // G
-        invoiceNumber,        // H
-        "przelew",            // I
-        "Faktura jest",       // J
-        ksefNumber,           // K
+        miesiacFormat, // B
+        `'${issueDate}`, // C
+        "", // D
+        "", // E
+        sellerName, // F
+        kwotaBrutto, // G
+        invoiceNumber, // H
+        "przelew", // I
+        "Faktura jest", // J
+        ksefNumber, // K
         permanentStorageDate, // L
-        "",                   // M
+        "", // M
       ]);
 
       // ---------------------------------------------------
       // Aktualizacja zbiorów
       // ---------------------------------------------------
-      existingKsefNumbers.add(
-        ksefNumber
-      );
+      existingKsefNumbers.add(ksefNumber);
 
-      seenKsefNumbers.add(
-        ksefNumber
-      );
+      seenKsefNumbers.add(ksefNumber);
 
-      existingLegacyKeys.add(
-        legacyKey
-      );
+      existingLegacyKeys.add(legacyKey);
 
-      seenLegacyKeys.add(
-        legacyKey
-      );
+      seenLegacyKeys.add(legacyKey);
     }
 
     // =====================================================
     // 10. Zapis do Google Sheets
     // =====================================================
-    if (
-      newInvoicesToAppend.length > 0
-    ) {
-      await sheets.spreadsheets.values.append(
-        {
-          spreadsheetId:
-            sheetId,
+    if (newInvoicesToAppend.length > 0) {
+      await sheets.spreadsheets.values.append({
+        spreadsheetId: sheetId,
 
-          range:
-            "Arkusz1!B:M",
+        range: "Arkusz1!B:M",
 
-          valueInputOption:
-            "USER_ENTERED",
+        valueInputOption: "USER_ENTERED",
 
-          insertDataOption:
-            "INSERT_ROWS",
+        insertDataOption: "INSERT_ROWS",
 
-          requestBody: {
-            values:
-              newInvoicesToAppend,
-          },
-        }
-      );
+        requestBody: {
+          values: newInvoicesToAppend,
+        },
+      });
     }
 
     // =====================================================
@@ -1128,10 +902,7 @@ export async function POST(request) {
     // Ukryte:
     // A, D, E, I, J, K, L, M
     // =====================================================
-    await hideNonEssentialColumns(
-      sheets,
-      sheetId
-    );
+    await hideNonEssentialColumns(sheets, sheetId);
 
     // =====================================================
     // 12. Odpowiedź
@@ -1139,32 +910,24 @@ export async function POST(request) {
     return NextResponse.json({
       success: true,
 
-      added:
-        newInvoicesToAppend.length,
+      added: newInvoicesToAppend.length,
 
-      fetched:
-        allInvoices.length,
+      fetched: allInvoices.length,
 
       message:
         `Znaleziono faktur w KSeF: ${allInvoices.length}. ` +
         `Dodano nowych: ${newInvoicesToAppend.length}.`,
     });
   } catch (error) {
-    console.error(
-      "Wystąpił błąd krytyczny:",
-      error
-    );
+    console.error("Wystąpił błąd krytyczny:", error);
 
     return NextResponse.json(
       {
-        error:
-          error instanceof Error
-            ? error.message
-            : String(error),
+        error: error instanceof Error ? error.message : String(error),
       },
       {
         status: 500,
-      }
+      },
     );
   }
 }
