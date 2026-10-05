@@ -1,3 +1,5 @@
+export const runtime = "nodejs";
+
 import { NextResponse } from "next/server";
 import { google } from "googleapis";
 import crypto from "crypto";
@@ -6,6 +8,7 @@ const KSEF_BASE_URL =
   "https://api.ksef.mf.gov.pl/v2";
 
 const SHEET_NAME = "Arkusz1";
+
 
 // ============================================================
 // POMOCNICZE
@@ -60,11 +63,13 @@ async function parseKsefResponse(
   return data;
 }
 
+
 function sleep(ms) {
   return new Promise((resolve) =>
     setTimeout(resolve, ms)
   );
 }
+
 
 // ============================================================
 // NORMALIZACJA
@@ -77,6 +82,7 @@ function normalizeText(value) {
     .replace(/^'/, "")
     .replace(/\s+/g, " ");
 }
+
 
 function normalizeDate(value) {
   const text = normalizeText(value);
@@ -99,7 +105,7 @@ function normalizeDate(value) {
     );
   }
 
-  // DD.MM.YYYY
+  // DD.MM.YYYY / DD-MM-YYYY / DD/MM/YYYY
   const polishMatch =
     text.match(
       /^(\d{2})[.\-/](\d{2})[.\-/](\d{4})$/
@@ -115,6 +121,7 @@ function normalizeDate(value) {
 
   return text;
 }
+
 
 function normalizeAmount(value) {
   if (
@@ -151,13 +158,16 @@ function normalizeAmount(value) {
       text.lastIndexOf(".");
 
     if (lastComma > lastDot) {
+      // 18.445,08
       text = text
         .replace(/\./g, "")
         .replace(",", ".");
     } else {
+      // 18,445.08
       text = text.replace(/,/g, "");
     }
   } else if (text.includes(",")) {
+    // 18445,08
     text = text.replace(",", ".");
   }
 
@@ -169,6 +179,7 @@ function normalizeAmount(value) {
 
   return number.toFixed(2);
 }
+
 
 // ============================================================
 // KLUCZ FALLBACK
@@ -188,6 +199,7 @@ function createInvoiceKey({
   ].join("|");
 }
 
+
 // ============================================================
 // KSEF - AUTORYZACJA
 // ============================================================
@@ -201,6 +213,7 @@ async function authenticateKsef(nipFirmy) {
       "Brak zmiennej środowiskowej KSEF_TOKEN."
     );
   }
+
 
   // ----------------------------------------------------------
   // 1. Challenge
@@ -252,6 +265,7 @@ async function authenticateKsef(nipFirmy) {
       "KSeF Challenge: brak pola challenge lub timestampMs."
     );
   }
+
 
   // ----------------------------------------------------------
   // 2. Publiczny certyfikat
@@ -322,6 +336,7 @@ async function authenticateKsef(nipFirmy) {
     `${certificateLines}\n` +
     `-----END CERTIFICATE-----`;
 
+
   // ----------------------------------------------------------
   // 3. Szyfrowanie tokena
   // ----------------------------------------------------------
@@ -349,6 +364,7 @@ async function authenticateKsef(nipFirmy) {
         )
       )
       .toString("base64");
+
 
   // ----------------------------------------------------------
   // 4. Rozpoczęcie autoryzacji
@@ -408,6 +424,7 @@ async function authenticateKsef(nipFirmy) {
       "KSeF Auth: brak danych uwierzytelniania."
     );
   }
+
 
   // ----------------------------------------------------------
   // 5. Status autoryzacji
@@ -480,6 +497,7 @@ async function authenticateKsef(nipFirmy) {
     );
   }
 
+
   // ----------------------------------------------------------
   // 6. Redeem token
   // ----------------------------------------------------------
@@ -523,6 +541,7 @@ async function authenticateKsef(nipFirmy) {
   return accessToken;
 }
 
+
 // ============================================================
 // GOOGLE SHEETS - INFORMACJE O ARKUSZU
 // ============================================================
@@ -564,13 +583,14 @@ async function getSheetInfo(
   };
 }
 
+
 // ============================================================
 // GOOGLE SHEETS - ISTNIEJĄCE FAKTURY
 // ============================================================
 
 async function getExistingInvoices(
   sheets,
-  sheetId
+  spreadsheetId
 ) {
   const existingKsefNumbers =
     new Set();
@@ -589,7 +609,7 @@ async function getExistingInvoices(
   const response =
     await sheets.spreadsheets.values.get(
       {
-        spreadsheetId: sheetId,
+        spreadsheetId,
 
         range:
           `${SHEET_NAME}!B:O`,
@@ -643,6 +663,7 @@ async function getExistingInvoices(
         row[12] || ""
       ).trim();
 
+
     // --------------------------------------------------------
     // Główny identyfikator - KSeF
     // --------------------------------------------------------
@@ -652,6 +673,7 @@ async function getExistingInvoices(
         ksefNumber
       );
     }
+
 
     // --------------------------------------------------------
     // Fallback dla starych rekordów
@@ -680,6 +702,7 @@ async function getExistingInvoices(
     existingInvoiceKeys,
   };
 }
+
 
 // ============================================================
 // KSEF - POBIERANIE FAKTUR
@@ -793,6 +816,7 @@ async function fetchInvoicesFromKsef(
     isTruncated =
       syncData.isTruncated === true;
 
+
     // --------------------------------------------------------
     // Następna strona
     // --------------------------------------------------------
@@ -804,6 +828,7 @@ async function fetchInvoicesFromKsef(
       pageOffset += 250;
       continue;
     }
+
 
     // --------------------------------------------------------
     // Wynik ucięty
@@ -854,6 +879,7 @@ async function fetchInvoicesFromKsef(
 
   return allInvoices;
 }
+
 
 // ============================================================
 // PRZYGOTOWANIE NOWYCH FAKTUR
@@ -922,6 +948,7 @@ function prepareNewInvoices(
       inv.seller?.nip ||
       "Brak nazwy";
 
+
     if (
       !ksefNumber ||
       !invoiceNumber ||
@@ -929,6 +956,7 @@ function prepareNewInvoices(
     ) {
       continue;
     }
+
 
     // --------------------------------------------------------
     // 1. Duplikat w bieżącym pobraniu
@@ -946,6 +974,7 @@ function prepareNewInvoices(
       ksefNumber
     );
 
+
     // --------------------------------------------------------
     // 2. Duplikat już zapisany w N
     // --------------------------------------------------------
@@ -958,6 +987,7 @@ function prepareNewInvoices(
       continue;
     }
 
+
     // --------------------------------------------------------
     // Kwota
     // --------------------------------------------------------
@@ -969,11 +999,12 @@ function prepareNewInvoices(
         : parseFloat(
             String(
               inv.grossAmount ??
-                "0"
+              "0"
             )
               .replace(/\s/g, "")
               .replace(",", ".")
           );
+
 
     // --------------------------------------------------------
     // 3. Fallback dla starych rekordów
@@ -995,6 +1026,7 @@ function prepareNewInvoices(
       continue;
     }
 
+
     // --------------------------------------------------------
     // 4. Duplikat w bieżącym pobraniu
     // --------------------------------------------------------
@@ -1011,6 +1043,7 @@ function prepareNewInvoices(
       invoiceKey
     );
 
+
     // --------------------------------------------------------
     // Dodajemy również do istniejących
     // --------------------------------------------------------
@@ -1022,6 +1055,7 @@ function prepareNewInvoices(
     existingInvoiceKeys.add(
       invoiceKey
     );
+
 
     // --------------------------------------------------------
     // Miesiąc
@@ -1053,6 +1087,7 @@ function prepareNewInvoices(
       }
     }
 
+
     // --------------------------------------------------------
     // Kwota
     // --------------------------------------------------------
@@ -1065,6 +1100,7 @@ function prepareNewInvoices(
             .toFixed(2)
             .replace(".", ",")
         : "0,00";
+
 
     // --------------------------------------------------------
     // B:J
@@ -1079,6 +1115,8 @@ function prepareNewInvoices(
     // H = numer faktury
     // I = uzupelnic
     // J = uzupelnic
+    //
+    // K, L, M NIE SĄ DOTYKANE.
     //
     // N zostanie zapisane osobno.
     // --------------------------------------------------------
@@ -1105,6 +1143,7 @@ function prepareNewInvoices(
     ksefNumbers,
   };
 }
+
 
 // ============================================================
 // UKRYWANIE KOLUMNY N
@@ -1137,9 +1176,12 @@ async function hideTechnicalColumnN(
             updateDimensionProperties: {
               range: {
                 sheetId,
+
                 dimension:
                   "COLUMNS",
+
                 startIndex: 13,
+
                 endIndex: 14,
               },
 
@@ -1158,6 +1200,7 @@ async function hideTechnicalColumnN(
   );
 }
 
+
 // ============================================================
 // ZAPIS N - KSEF NUMBER
 // ============================================================
@@ -1173,6 +1216,18 @@ async function writeKsefNumbers(
     !ksefNumbers.length
   ) {
     return;
+  }
+
+  const expectedRows =
+    endRow - startRow + 1;
+
+  if (
+    expectedRows !==
+    ksefNumbers.length
+  ) {
+    throw new Error(
+      "Google Sheets: liczba dodanych wierszy nie zgadza się z liczbą ksefNumber."
+    );
   }
 
   await sheets.spreadsheets.values.update(
@@ -1197,6 +1252,56 @@ async function writeKsefNumbers(
   );
 }
 
+
+// ============================================================
+// ODCZYT NUMERÓW WIERSZY Z UPDATED RANGE
+// ============================================================
+
+function parseUpdatedRows(
+  updatedRange
+) {
+  /*
+   * Obsługujemy:
+   *
+   * Arkusz1!B131:J135
+   *
+   * oraz:
+   *
+   * Arkusz1!B131:J131
+   */
+
+  const rowMatch =
+    updatedRange.match(
+      /![A-Z]+(\d+)(?::[A-Z]+(\d+))?/
+    );
+
+  if (!rowMatch) {
+    throw new Error(
+      `Nie udało się odczytać numerów wierszy z zakresu: ${updatedRange}`
+    );
+  }
+
+  const startRow =
+    parseInt(
+      rowMatch[1],
+      10
+    );
+
+  const endRow =
+    rowMatch[2]
+      ? parseInt(
+          rowMatch[2],
+          10
+        )
+      : startRow;
+
+  return {
+    startRow,
+    endRow,
+  };
+}
+
+
 // ============================================================
 // POST /api/sync
 // ============================================================
@@ -1217,6 +1322,7 @@ export async function POST(
       sheetId,
     } = body;
 
+
     // --------------------------------------------------------
     // 2. API Secret
     // --------------------------------------------------------
@@ -1236,6 +1342,7 @@ export async function POST(
       );
     }
 
+
     // --------------------------------------------------------
     // 3. Sheet ID
     // --------------------------------------------------------
@@ -1251,6 +1358,7 @@ export async function POST(
         }
       );
     }
+
 
     // --------------------------------------------------------
     // 4. NIP
@@ -1272,6 +1380,7 @@ export async function POST(
         "NIP_FIRMY musi mieć 10 cyfr."
       );
     }
+
 
     // --------------------------------------------------------
     // 5. Google credentials
@@ -1300,6 +1409,7 @@ export async function POST(
       );
     }
 
+
     // --------------------------------------------------------
     // 6. Google Auth
     // --------------------------------------------------------
@@ -1325,6 +1435,7 @@ export async function POST(
         auth,
       });
 
+
     // --------------------------------------------------------
     // 7. Informacje o arkuszu
     // --------------------------------------------------------
@@ -1334,6 +1445,7 @@ export async function POST(
         sheets,
         sheetId
       );
+
 
     // --------------------------------------------------------
     // 8. Odczyt istniejących faktur
@@ -1345,6 +1457,7 @@ export async function POST(
         sheetId
       );
 
+
     // --------------------------------------------------------
     // 9. Autoryzacja KSeF
     // --------------------------------------------------------
@@ -1354,6 +1467,7 @@ export async function POST(
         nipFirmy
       );
 
+
     // --------------------------------------------------------
     // 10. Pobranie faktur
     // --------------------------------------------------------
@@ -1362,6 +1476,7 @@ export async function POST(
       await fetchInvoicesFromKsef(
         accessToken
       );
+
 
     // --------------------------------------------------------
     // 11. Ponowny odczyt arkusza
@@ -1377,6 +1492,7 @@ export async function POST(
         sheetId
       );
 
+
     // --------------------------------------------------------
     // 12. DEDUPLIKACJA
     // --------------------------------------------------------
@@ -1387,6 +1503,7 @@ export async function POST(
         existing.existingKsefNumbers,
         existing.existingInvoiceKeys
       );
+
 
     // --------------------------------------------------------
     // 13. Nic nowego
@@ -1420,8 +1537,16 @@ export async function POST(
       });
     }
 
+
     // --------------------------------------------------------
     // 14. Zapis B:J
+    // --------------------------------------------------------
+    //
+    // UWAGA:
+    // Nie zapisujemy B:O.
+    //
+    // Dzięki temu K, L oraz M pozostają
+    // całkowicie nietknięte.
     // --------------------------------------------------------
 
     const appendResponse =
@@ -1446,6 +1571,7 @@ export async function POST(
         }
       );
 
+
     // --------------------------------------------------------
     // 15. Ustalenie numerów wierszy
     // --------------------------------------------------------
@@ -1462,37 +1588,14 @@ export async function POST(
       );
     }
 
-    /*
-     * Przykład:
-     *
-     * Arkusz1!B131:J135
-     *
-     * Szukamy numeru pierwszego
-     * i ostatniego wiersza.
-     */
-
-    const rowMatch =
-      updatedRange.match(
-        /![A-Z]+(\d+):[A-Z]+(\d+)/
+    const {
+      startRow,
+      endRow,
+    } =
+      parseUpdatedRows(
+        updatedRange
       );
 
-    if (!rowMatch) {
-      throw new Error(
-        `Nie udało się odczytać numerów wierszy z zakresu: ${updatedRange}`
-      );
-    }
-
-    const startRow =
-      parseInt(
-        rowMatch[1],
-        10
-      );
-
-    const endRow =
-      parseInt(
-        rowMatch[2],
-        10
-      );
 
     // --------------------------------------------------------
     // 16. Zapis KSeF Number do N
@@ -1506,6 +1609,7 @@ export async function POST(
       prepared.ksefNumbers
     );
 
+
     // --------------------------------------------------------
     // 17. Ukrycie N
     // --------------------------------------------------------
@@ -1515,6 +1619,7 @@ export async function POST(
       sheetId,
       sheetInfo.sheetId
     );
+
 
     // --------------------------------------------------------
     // 18. Odpowiedź
@@ -1534,6 +1639,7 @@ export async function POST(
         `w KSeF. Dodano nowych: ` +
         `${prepared.rows.length}.`,
     });
+
   } catch (error) {
     console.error(
       "Wystąpił błąd krytyczny:",
