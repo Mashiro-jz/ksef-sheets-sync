@@ -264,7 +264,7 @@ async function getExistingInvoices(sheets, spreadsheetId) {
     const sellerName = String(row[4] || "").trim();
     const grossAmount = row[5];
     const invoiceNumber = String(row[6] || "").trim();
-    const ksefNumber = String(row[12] || "").trim(); // Odczytujemy kolumnę N
+    const ksefNumber = String(row[12] || "").trim(); // Kolumna N (numer KSeF)
 
     if (ksefNumber) existingKsefNumbers.add(ksefNumber);
 
@@ -278,71 +278,65 @@ async function getExistingInvoices(sheets, spreadsheetId) {
 }
 
 // ============================================================
-// KSEF - POBIERANIE FAKTUR
+// KSEF - POBIERANIE FAKTUR (ROZWIĄZANIE PROBLEMU HTTP 400)
 // ============================================================
 
 async function fetchInvoicesFromKsef(accessToken) {
   const now = new Date();
-  const threeMonthsAgo = new Date(now);
-  threeMonthsAgo.setMonth(threeMonthsAgo.getMonth() - 3);
-
-  let fromISO = threeMonthsAgo.toISOString();
-  const toISO = now.toISOString();
+  // Zawsze cofamy się o 2 miesiące żeby obejmowało to sztywny okres rozliczeniowy
+  const startDate = new Date(now.getFullYear(), now.getMonth() - 2, 1, 0, 0, 0, 0);
 
   const allInvoices = [];
-  let pageOffset = 0;
-  let hasMore = true;
-  let isTruncated = false;
-  let safetyCounter = 0;
+  let currentStart = new Date(startDate);
 
-  while (hasMore) {
-    safetyCounter++;
-    if (safetyCounter > 1000) throw new Error("KSeF: przekroczono limit stron synchronizacji.");
+  // Chunkowanie (paczki): KSeF API nie pozwala na odpytanie zakresu dłuższego niż 31 dni!
+  while (currentStart < now) {
+    let currentEnd = new Date(currentStart);
+    currentEnd.setDate(currentEnd.getDate() + 30); // 30 dni żeby było bezpiecznie poniżej limitu
+    
+    if (currentEnd > now) {
+      currentEnd = now;
+    }
 
-    const url = `${KSEF_BASE_URL}/invoices/query/metadata?pageSize=250&pageOffset=${pageOffset}&sortOrder=Asc`;
-    const syncRes = await fetch(url, {
-      method: "POST",
-      headers: {
-        Accept: "application/json",
-        "Content-Type": "application/json",
-        Authorization: `Bearer ${accessToken}`,
-        "X-Error-Format": "problem-details",
-      },
-      body: JSON.stringify({
-        subjectType: "Subject2",
-        dateRange: {
-          dateType: "PermanentStorage",
-          from: fromISO,
-          to: toISO,
-          restrictToPermanentStorageHwmDate: true,
+    let pageOffset = 0;
+    let hasMore = true;
+    let safetyCounter = 0;
+
+    while (hasMore) {
+      safetyCounter++;
+      if (safetyCounter > 1000) throw new Error("KSeF: przekroczono limit stron synchronizacji.");
+
+      const url = `${KSEF_BASE_URL}/invoices/query/metadata?pageSize=250&pageOffset=${pageOffset}&sortOrder=Asc`;
+      const syncRes = await fetch(url, {
+        method: "POST",
+        headers: {
+          Accept: "application/json",
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${accessToken}`,
+          "X-Error-Format": "problem-details",
         },
-      }),
-    });
+        body: JSON.stringify({
+          subjectType: "Subject2",
+          dateRange: {
+            dateType: "Invoicing", // Sprawdzony, prawidłowy model daty
+            from: currentStart.toISOString(),
+            to: currentEnd.toISOString()
+          },
+        }),
+      });
 
-    const syncData = await parseKsefResponse(syncRes, "KSeF Invoice Metadata");
-    const invoices = Array.isArray(syncData.invoices) ? syncData.invoices : [];
-    allInvoices.push(...invoices);
+      const syncData = await parseKsefResponse(syncRes, "KSeF Invoice Metadata");
+      const invoices = Array.isArray(syncData.invoices) ? syncData.invoices : [];
+      allInvoices.push(...invoices);
 
-    hasMore = syncData.hasMore === true;
-    isTruncated = syncData.isTruncated === true;
-
-    if (hasMore && !isTruncated) {
-      pageOffset += 250;
-      continue;
+      hasMore = syncData.hasMore === true;
+      if (hasMore) {
+        pageOffset += 250;
+      }
     }
 
-    if (hasMore && isTruncated) {
-      const lastInvoice = invoices[invoices.length - 1];
-      const lastDate = lastInvoice?.permanentStorageDate;
-      if (!lastDate) throw new Error("KSeF: wynik jest ucięty, ale ostatnia faktura nie ma permanentStorageDate.");
-      if (lastDate === fromISO) break;
-
-      fromISO = lastDate;
-      pageOffset = 0;
-      continue;
-    }
-
-    break;
+    // Dodajemy 1 milisekundę aby uniknąć nakładania się dat w zapytaniach
+    currentStart = new Date(currentEnd.getTime() + 1);
   }
 
   return allInvoices;
@@ -399,21 +393,21 @@ function prepareNewInvoices(allInvoices, existingKsefNumbers, existingInvoiceKey
 
     const kwotaBrutto = Number.isFinite(grossAmount) ? grossAmount.toFixed(2).replace(".", ",") : "0,00";
 
-    // Wrzucamy dane przygotowane bezpośrednio do B:N (łącznie 13 elementów)
+    // Wrzucamy dane przygotowane bezpośrednio do B:N (łącznie 13 elementów w każdym wierszu)
     rows.push([
-      miesiacFormat,     // B
-      `'${issueDate}`,   // C
-      "",                // D
-      "",                // E
-      sellerName,        // F
-      kwotaBrutto,       // G
-      invoiceNumber,     // H
-      "uzupelnic",       // I - Domyślnie "uzupelnic"
-      "uzupelnic",       // J - Domyślnie "uzupelnic"
-      "",                // K
-      "",                // L
-      "",                // M
-      ksefNumber         // N - Zapisywane jako metadana
+      miesiacFormat,     // B (Miesiąc)
+      `'${issueDate}`,   // C (Data)
+      "",                // D (Puste Konto)
+      "",                // E (Puste Subkonto)
+      sellerName,        // F (Sprzedawca)
+      kwotaBrutto,       // G (Kwota)
+      invoiceNumber,     // H (Numer faktury)
+      "uzupelnic",       // I (gotówka / przelew - Domyślnie uzupelnic)
+      "uzupelnic",       // J (Faktura / paragon - Domyślnie uzupelnic)
+      "",                // K (Puste)
+      "",                // L (Puste)
+      "",                // M (Puste)
+      ksefNumber         // N (Numer KSeF jako metadana)
     ]);
   }
 
@@ -435,7 +429,7 @@ async function hideTechnicalColumnN(sheets, spreadsheetId, sheetId) {
             range: {
               sheetId,
               dimension: "COLUMNS",
-              startIndex: 13, // N
+              startIndex: 13, // Kolumna N
               endIndex: 14,
             },
             properties: { hiddenByUser: true },
@@ -479,10 +473,11 @@ export async function POST(request) {
 
     const sheetInfo = await getSheetInfo(sheets, sheetId);
     let existing = await getExistingInvoices(sheets, sheetId);
+    
     const accessToken = await authenticateKsef(nipFirmy);
     const allInvoices = await fetchInvoicesFromKsef(accessToken);
+    
     existing = await getExistingInvoices(sheets, sheetId);
-
     const prepared = prepareNewInvoices(allInvoices, existing.existingKsefNumbers, existing.existingInvoiceKeys);
 
     if (prepared.rows.length === 0) {
