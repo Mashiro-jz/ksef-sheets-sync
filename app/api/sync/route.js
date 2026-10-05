@@ -2,13 +2,19 @@ import { NextResponse } from "next/server";
 import { google } from "googleapis";
 import crypto from "crypto";
 
-const KSEF_BASE_URL = "https://api.ksef.mf.gov.pl/v2";
+const KSEF_BASE_URL =
+  "https://api.ksef.mf.gov.pl/v2";
+
+const SHEET_NAME = "Arkusz1";
 
 // ============================================================
 // POMOCNICZE
 // ============================================================
 
-async function parseKsefResponse(response, operationName) {
+async function parseKsefResponse(
+  response,
+  operationName
+) {
   const text = await response.text();
 
   let data;
@@ -30,7 +36,10 @@ async function parseKsefResponse(response, operationName) {
             ? ` (${item.details.join("; ")})`
             : "";
 
-          return `${item.exceptionCode}: ${item.exceptionDescription}${details}`;
+          return (
+            `${item.exceptionCode}: ` +
+            `${item.exceptionDescription}${details}`
+          );
         })
         .join(" | ");
 
@@ -43,7 +52,8 @@ async function parseKsefResponse(response, operationName) {
       response.statusText;
 
     throw new Error(
-      `${operationName}: ${message} [HTTP ${response.status}]`
+      `${operationName}: ${message} ` +
+        `[HTTP ${response.status}]`
     );
   }
 
@@ -51,7 +61,9 @@ async function parseKsefResponse(response, operationName) {
 }
 
 function sleep(ms) {
-  return new Promise((resolve) => setTimeout(resolve, ms));
+  return new Promise((resolve) =>
+    setTimeout(resolve, ms)
+  );
 }
 
 // ============================================================
@@ -62,32 +74,106 @@ function normalizeText(value) {
   return String(value ?? "")
     .trim()
     .toLowerCase()
-    .replace(/^'/, "");
+    .replace(/^'/, "")
+    .replace(/\s+/g, " ");
 }
 
-function normalizeAmount(value) {
-  if (value === null || value === undefined || value === "") {
+function normalizeDate(value) {
+  const text = normalizeText(value);
+
+  if (!text) {
     return "";
   }
 
-  const normalized = String(value)
-    .trim()
-    .replace(",", ".");
+  // YYYY-MM-DD
+  const isoMatch =
+    text.match(
+      /^(\d{4})-(\d{2})-(\d{2})/
+    );
 
-  const number = Number(normalized);
+  if (isoMatch) {
+    return (
+      `${isoMatch[1]}-` +
+      `${isoMatch[2]}-` +
+      `${isoMatch[3]}`
+    );
+  }
+
+  // DD.MM.YYYY
+  const polishMatch =
+    text.match(
+      /^(\d{2})[.\-/](\d{2})[.\-/](\d{4})$/
+    );
+
+  if (polishMatch) {
+    return (
+      `${polishMatch[3]}-` +
+      `${polishMatch[2]}-` +
+      `${polishMatch[1]}`
+    );
+  }
+
+  return text;
+}
+
+function normalizeAmount(value) {
+  if (
+    value === null ||
+    value === undefined ||
+    value === ""
+  ) {
+    return "";
+  }
+
+  let text = String(value)
+    .trim()
+    .toLowerCase()
+    .replace(/zł/g, "")
+    .replace(/\s/g, "");
+
+  /*
+   * Obsługa np.:
+   *
+   * 18445,08
+   * 18 445,08
+   * 18445.08
+   * 18.445,08
+   */
+
+  if (
+    text.includes(",") &&
+    text.includes(".")
+  ) {
+    const lastComma =
+      text.lastIndexOf(",");
+
+    const lastDot =
+      text.lastIndexOf(".");
+
+    if (lastComma > lastDot) {
+      text = text
+        .replace(/\./g, "")
+        .replace(",", ".");
+    } else {
+      text = text.replace(/,/g, "");
+    }
+  } else if (text.includes(",")) {
+    text = text.replace(",", ".");
+  }
+
+  const number = Number(text);
 
   if (!Number.isFinite(number)) {
-    return normalized;
+    return normalizeText(value);
   }
 
   return number.toFixed(2);
 }
 
-/**
- * Klucz pomocniczy do rozpoznawania faktury.
- *
- * NIE jest zapisywany do Google Sheets.
- */
+// ============================================================
+// KLUCZ FALLBACK
+// ============================================================
+
 function createInvoiceKey({
   invoiceNumber,
   issueDate,
@@ -96,7 +182,7 @@ function createInvoiceKey({
 }) {
   return [
     normalizeText(invoiceNumber),
-    normalizeText(issueDate),
+    normalizeDate(issueDate),
     normalizeText(sellerName),
     normalizeAmount(grossAmount),
   ].join("|");
@@ -107,7 +193,8 @@ function createInvoiceKey({
 // ============================================================
 
 async function authenticateKsef(nipFirmy) {
-  const ksefToken = process.env.KSEF_TOKEN;
+  const ksefToken =
+    process.env.KSEF_TOKEN;
 
   if (!ksefToken) {
     throw new Error(
@@ -119,63 +206,89 @@ async function authenticateKsef(nipFirmy) {
   // 1. Challenge
   // ----------------------------------------------------------
 
-  const challengeRes = await fetch(
-    `${KSEF_BASE_URL}/auth/challenge`,
-    {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        Accept: "application/json",
-        "X-Error-Format": "problem-details",
-      },
-      body: JSON.stringify({
-        contextIdentifier: {
-          type: "Nip",
-          value: nipFirmy,
+  const challengeRes =
+    await fetch(
+      `${KSEF_BASE_URL}/auth/challenge`,
+      {
+        method: "POST",
+
+        headers: {
+          "Content-Type":
+            "application/json",
+
+          Accept:
+            "application/json",
+
+          "X-Error-Format":
+            "problem-details",
         },
-      }),
-    }
-  );
 
-  const challengeData = await parseKsefResponse(
-    challengeRes,
-    "KSeF Challenge"
-  );
+        body: JSON.stringify({
+          contextIdentifier: {
+            type: "Nip",
+            value: nipFirmy,
+          },
+        }),
+      }
+    );
 
-  const challenge = challengeData.challenge;
-  const timestampMs = challengeData.timestampMs;
+  const challengeData =
+    await parseKsefResponse(
+      challengeRes,
+      "KSeF Challenge"
+    );
 
-  if (!challenge || !timestampMs) {
+  const challenge =
+    challengeData.challenge;
+
+  const timestampMs =
+    challengeData.timestampMs;
+
+  if (
+    !challenge ||
+    !timestampMs
+  ) {
     throw new Error(
       "KSeF Challenge: brak pola challenge lub timestampMs."
     );
   }
 
   // ----------------------------------------------------------
-  // 2. Publiczny certyfikat KSeF
+  // 2. Publiczny certyfikat
   // ----------------------------------------------------------
 
-  const certRes = await fetch(
-    `${KSEF_BASE_URL}/security/public-key-certificates`,
-    {
-      method: "GET",
-      headers: {
-        Accept: "application/json",
-        "X-Error-Format": "problem-details",
-      },
-    }
-  );
+  const certRes =
+    await fetch(
+      `${KSEF_BASE_URL}/security/public-key-certificates`,
+      {
+        method: "GET",
 
-  const certsJson = await parseKsefResponse(
-    certRes,
-    "KSeF Public Key Certificates"
-  );
+        headers: {
+          Accept:
+            "application/json",
 
-  const cert = certsJson.find(
-    (item) =>
-      Array.isArray(item.usage) &&
-      item.usage.includes("KsefTokenEncryption")
-  );
+          "X-Error-Format":
+            "problem-details",
+        },
+      }
+    );
+
+  const certsJson =
+    await parseKsefResponse(
+      certRes,
+      "KSeF Public Key Certificates"
+    );
+
+  const cert =
+    certsJson.find(
+      (item) =>
+        Array.isArray(
+          item.usage
+        ) &&
+        item.usage.includes(
+          "KsefTokenEncryption"
+        )
+    );
 
   if (
     !cert ||
@@ -187,11 +300,16 @@ async function authenticateKsef(nipFirmy) {
     );
   }
 
-  const base64DerCert = cert.certificate;
-  const publicKeyId = cert.publicKeyId;
+  const base64DerCert =
+    cert.certificate;
+
+  const publicKeyId =
+    cert.publicKeyId;
 
   const certificateLines =
-    base64DerCert.match(/.{1,64}/g)?.join("\n");
+    base64DerCert
+      .match(/.{1,64}/g)
+      ?.join("\n");
 
   if (!certificateLines) {
     throw new Error(
@@ -211,53 +329,76 @@ async function authenticateKsef(nipFirmy) {
   const authMessage =
     `${ksefToken}|${timestampMs}`;
 
-  const encryptedToken = crypto
-    .publicEncrypt(
-      {
-        key: publicKeyPem,
-        padding:
-          crypto.constants.RSA_PKCS1_OAEP_PADDING,
-        oaepHash: "sha256",
-      },
-      Buffer.from(authMessage, "utf8")
-    )
-    .toString("base64");
+  const encryptedToken =
+    crypto
+      .publicEncrypt(
+        {
+          key: publicKeyPem,
+
+          padding:
+            crypto.constants
+              .RSA_PKCS1_OAEP_PADDING,
+
+          oaepHash:
+            "sha256",
+        },
+
+        Buffer.from(
+          authMessage,
+          "utf8"
+        )
+      )
+      .toString("base64");
 
   // ----------------------------------------------------------
   // 4. Rozpoczęcie autoryzacji
   // ----------------------------------------------------------
 
-  const authKsefRes = await fetch(
-    `${KSEF_BASE_URL}/auth/ksef-token`,
-    {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        Accept: "application/json",
-        "X-Error-Format": "problem-details",
-      },
-      body: JSON.stringify({
-        challenge,
-        contextIdentifier: {
-          type: "Nip",
-          value: nipFirmy,
-        },
-        encryptedToken,
-        publicKeyId,
-      }),
-    }
-  );
+  const authKsefRes =
+    await fetch(
+      `${KSEF_BASE_URL}/auth/ksef-token`,
+      {
+        method: "POST",
 
-  const authData = await parseKsefResponse(
-    authKsefRes,
-    "KSeF Auth"
-  );
+        headers: {
+          "Content-Type":
+            "application/json",
+
+          Accept:
+            "application/json",
+
+          "X-Error-Format":
+            "problem-details",
+        },
+
+        body: JSON.stringify({
+          challenge,
+
+          contextIdentifier: {
+            type: "Nip",
+            value: nipFirmy,
+          },
+
+          encryptedToken,
+
+          publicKeyId,
+        }),
+      }
+    );
+
+  const authData =
+    await parseKsefResponse(
+      authKsefRes,
+      "KSeF Auth"
+    );
 
   const referenceNumber =
     authData.referenceNumber;
 
   const authenticationToken =
-    authData.authenticationToken?.token;
+    authData
+      .authenticationToken
+      ?.token;
 
   if (
     !referenceNumber ||
@@ -269,7 +410,7 @@ async function authenticateKsef(nipFirmy) {
   }
 
   // ----------------------------------------------------------
-  // 5. Oczekiwanie na zakończenie autoryzacji
+  // 5. Status autoryzacji
   // ----------------------------------------------------------
 
   let authStatus = null;
@@ -281,32 +422,44 @@ async function authenticateKsef(nipFirmy) {
   ) {
     await sleep(500);
 
-    const statusRes = await fetch(
-      `${KSEF_BASE_URL}/auth/${encodeURIComponent(
-        referenceNumber
-      )}`,
-      {
-        method: "GET",
-        headers: {
-          Accept: "application/json",
-          Authorization:
-            `Bearer ${authenticationToken}`,
-          "X-Error-Format":
-            "problem-details",
-        },
-      }
-    );
+    const statusRes =
+      await fetch(
+        `${KSEF_BASE_URL}/auth/${encodeURIComponent(
+          referenceNumber
+        )}`,
+        {
+          method: "GET",
 
-    authStatus = await parseKsefResponse(
-      statusRes,
-      "KSeF Auth Status"
-    );
+          headers: {
+            Accept:
+              "application/json",
 
-    if (authStatus?.status?.code === 200) {
+            Authorization:
+              `Bearer ${authenticationToken}`,
+
+            "X-Error-Format":
+              "problem-details",
+          },
+        }
+      );
+
+    authStatus =
+      await parseKsefResponse(
+        statusRes,
+        "KSeF Auth Status"
+      );
+
+    if (
+      authStatus?.status?.code ===
+      200
+    ) {
       break;
     }
 
-    if (authStatus?.status?.code === 100) {
+    if (
+      authStatus?.status?.code ===
+      100
+    ) {
       continue;
     }
 
@@ -318,37 +471,48 @@ async function authenticateKsef(nipFirmy) {
     );
   }
 
-  if (authStatus?.status?.code !== 200) {
+  if (
+    authStatus?.status?.code !==
+    200
+  ) {
     throw new Error(
       "KSeF Auth Status: Timeout."
     );
   }
 
   // ----------------------------------------------------------
-  // 6. Redeem access token
+  // 6. Redeem token
   // ----------------------------------------------------------
 
-  const redeemRes = await fetch(
-    `${KSEF_BASE_URL}/auth/token/redeem`,
-    {
-      method: "POST",
-      headers: {
-        Accept: "application/json",
-        Authorization:
-          `Bearer ${authenticationToken}`,
-        "X-Error-Format":
-          "problem-details",
-      },
-    }
-  );
+  const redeemRes =
+    await fetch(
+      `${KSEF_BASE_URL}/auth/token/redeem`,
+      {
+        method: "POST",
 
-  const redeemData = await parseKsefResponse(
-    redeemRes,
-    "KSeF Token Redeem"
-  );
+        headers: {
+          Accept:
+            "application/json",
+
+          Authorization:
+            `Bearer ${authenticationToken}`,
+
+          "X-Error-Format":
+            "problem-details",
+        },
+      }
+    );
+
+  const redeemData =
+    await parseKsefResponse(
+      redeemRes,
+      "KSeF Token Redeem"
+    );
 
   const accessToken =
-    redeemData?.accessToken?.token;
+    redeemData
+      ?.accessToken
+      ?.token;
 
   if (!accessToken) {
     throw new Error(
@@ -360,50 +524,100 @@ async function authenticateKsef(nipFirmy) {
 }
 
 // ============================================================
-// GOOGLE SHEETS
+// GOOGLE SHEETS - INFORMACJE O ARKUSZU
 // ============================================================
 
-/**
- * Pobiera istniejące faktury z arkusza.
- *
- * Czytamy WYŁĄCZNIE:
- *
- * B = miesiąc
- * C = data
- * D = puste
- * E = puste
- * F = sprzedawca
- * G = kwota
- * H = numer faktury
- *
- * ŻADNE metadane KSeF nie są pobierane z arkusza.
- */
+async function getSheetInfo(
+  sheets,
+  spreadsheetId
+) {
+  const response =
+    await sheets.spreadsheets.get({
+      spreadsheetId,
+
+      fields:
+        "sheets.properties",
+    });
+
+  const sheetsList =
+    response.data.sheets || [];
+
+  const found =
+    sheetsList.find(
+      (sheet) =>
+        sheet.properties?.title ===
+        SHEET_NAME
+    );
+
+  if (!found) {
+    throw new Error(
+      `Nie znaleziono arkusza "${SHEET_NAME}".`
+    );
+  }
+
+  return {
+    sheetId:
+      found.properties.sheetId,
+
+    title:
+      found.properties.title,
+  };
+}
+
+// ============================================================
+// GOOGLE SHEETS - ISTNIEJĄCE FAKTURY
+// ============================================================
+
 async function getExistingInvoices(
   sheets,
   sheetId
 ) {
-  const existingKeys = new Set();
+  const existingKsefNumbers =
+    new Set();
+
+  const existingInvoiceKeys =
+    new Set();
+
+  /*
+   * Czytamy B:O.
+   *
+   * K, L, M pozostają nietknięte.
+   *
+   * N = ksefNumber
+   */
 
   const response =
-    await sheets.spreadsheets.values.get({
-      spreadsheetId: sheetId,
-      range: "Arkusz1!B:H",
-      valueRenderOption:
-        "FORMATTED_VALUE",
-    });
+    await sheets.spreadsheets.values.get(
+      {
+        spreadsheetId: sheetId,
+
+        range:
+          `${SHEET_NAME}!B:O`,
+
+        valueRenderOption:
+          "FORMATTED_VALUE",
+      }
+    );
 
   const rows =
     response.data.values || [];
 
   for (const row of rows) {
     /*
-     * B = row[0]
-     * C = row[1]
-     * D = row[2]
-     * E = row[3]
-     * F = row[4]
-     * G = row[5]
-     * H = row[6]
+     * B = 0
+     * C = 1
+     * D = 2
+     * E = 3
+     * F = 4
+     * G = 5
+     * H = 6
+     * I = 7
+     * J = 8
+     * K = 9
+     * L = 10
+     * M = 11
+     * N = 12
+     * O = 13
      */
 
     const issueDate =
@@ -412,33 +626,59 @@ async function getExistingInvoices(
         .replace(/^'/, "");
 
     const sellerName =
-      String(row[4] || "").trim();
+      String(
+        row[4] || ""
+      ).trim();
 
     const grossAmount =
       row[5];
 
     const invoiceNumber =
-      String(row[6] || "").trim();
+      String(
+        row[6] || ""
+      ).trim();
 
-    if (
-      !invoiceNumber ||
-      !issueDate
-    ) {
-      continue;
+    const ksefNumber =
+      String(
+        row[12] || ""
+      ).trim();
+
+    // --------------------------------------------------------
+    // Główny identyfikator - KSeF
+    // --------------------------------------------------------
+
+    if (ksefNumber) {
+      existingKsefNumbers.add(
+        ksefNumber
+      );
     }
 
-    const invoiceKey =
-      createInvoiceKey({
-        invoiceNumber,
-        issueDate,
-        sellerName,
-        grossAmount,
-      });
+    // --------------------------------------------------------
+    // Fallback dla starych rekordów
+    // --------------------------------------------------------
 
-    existingKeys.add(invoiceKey);
+    if (
+      invoiceNumber &&
+      issueDate
+    ) {
+      const invoiceKey =
+        createInvoiceKey({
+          invoiceNumber,
+          issueDate,
+          sellerName,
+          grossAmount,
+        });
+
+      existingInvoiceKeys.add(
+        invoiceKey
+      );
+    }
   }
 
-  return existingKeys;
+  return {
+    existingKsefNumbers,
+    existingInvoiceKeys,
+  };
 }
 
 // ============================================================
@@ -448,25 +688,21 @@ async function getExistingInvoices(
 async function fetchInvoicesFromKsef(
   accessToken
 ) {
-  const teraz = new Date();
+  const now =
+    new Date();
 
-  /*
-   * KSeF pozwala obecnie na zapytania
-   * o metadane maksymalnie w zakresie 3 miesięcy.
-   */
+  const threeMonthsAgo =
+    new Date(now);
 
-  const trzyMiesiaceTemu =
-    new Date(teraz);
-
-  trzyMiesiaceTemu.setMonth(
-    trzyMiesiaceTemu.getMonth() - 3
+  threeMonthsAgo.setMonth(
+    threeMonthsAgo.getMonth() - 3
   );
 
   let fromISO =
-    trzyMiesiaceTemu.toISOString();
+    threeMonthsAgo.toISOString();
 
   const toISO =
-    teraz.toISOString();
+    now.toISOString();
 
   const allInvoices = [];
 
@@ -479,7 +715,9 @@ async function fetchInvoicesFromKsef(
   while (hasMore) {
     safetyCounter++;
 
-    if (safetyCounter > 1000) {
+    if (
+      safetyCounter > 1000
+    ) {
       throw new Error(
         "KSeF: przekroczono limit stron synchronizacji."
       );
@@ -491,32 +729,46 @@ async function fetchInvoicesFromKsef(
       `&pageOffset=${pageOffset}` +
       `&sortOrder=Asc`;
 
-    const syncRes = await fetch(
-      url,
-      {
-        method: "POST",
-        headers: {
-          Accept: "application/json",
-          "Content-Type":
-            "application/json",
-          Authorization:
-            `Bearer ${accessToken}`,
-          "X-Error-Format":
-            "problem-details",
-        },
-        body: JSON.stringify({
-          subjectType: "Subject2",
-          dateRange: {
-            dateType:
-              "PermanentStorage",
-            from: fromISO,
-            to: toISO,
-            restrictToPermanentStorageHwmDate:
-              true,
+    const syncRes =
+      await fetch(
+        url,
+        {
+          method: "POST",
+
+          headers: {
+            Accept:
+              "application/json",
+
+            "Content-Type":
+              "application/json",
+
+            Authorization:
+              `Bearer ${accessToken}`,
+
+            "X-Error-Format":
+              "problem-details",
           },
-        }),
-      }
-    );
+
+          body: JSON.stringify({
+            subjectType:
+              "Subject2",
+
+            dateRange: {
+              dateType:
+                "PermanentStorage",
+
+              from:
+                fromISO,
+
+              to:
+                toISO,
+
+              restrictToPermanentStorageHwmDate:
+                true,
+            },
+          }),
+        }
+      );
 
     const syncData =
       await parseKsefResponse(
@@ -542,7 +794,7 @@ async function fetchInvoicesFromKsef(
       syncData.isTruncated === true;
 
     // --------------------------------------------------------
-    // Kolejna strona
+    // Następna strona
     // --------------------------------------------------------
 
     if (
@@ -567,7 +819,8 @@ async function fetchInvoicesFromKsef(
         ];
 
       const lastDate =
-        lastInvoice?.permanentStorageDate;
+        lastInvoice
+          ?.permanentStorageDate;
 
       if (!lastDate) {
         throw new Error(
@@ -575,7 +828,22 @@ async function fetchInvoicesFromKsef(
         );
       }
 
-      fromISO = lastDate;
+      /*
+       * Jeżeli KSeF zwróci dokładnie
+       * ten sam punkt rozpoczęcia,
+       * przerywamy zamiast zapętlać requesty.
+       */
+
+      if (
+        lastDate ===
+        fromISO
+      ) {
+        break;
+      }
+
+      fromISO =
+        lastDate;
+
       pageOffset = 0;
 
       continue;
@@ -588,12 +856,13 @@ async function fetchInvoicesFromKsef(
 }
 
 // ============================================================
-// DEDUPLIKACJA
+// PRZYGOTOWANIE NOWYCH FAKTUR
 // ============================================================
 
 function prepareNewInvoices(
   allInvoices,
-  existingKeys
+  existingKsefNumbers,
+  existingInvoiceKeys
 ) {
   const nazwyMiesiecy = [
     "01 (STY)",
@@ -610,27 +879,21 @@ function prepareNewInvoices(
     "12 (GRU)",
   ];
 
-  /*
-   * Chroni przed powtórzeniem
-   * tego samego ksefNumber
-   * w jednym pobraniu.
-   */
   const seenKsefNumbers =
     new Set();
 
-  /*
-   * Chroni przed powtórzeniem
-   * tych samych danych biznesowych
-   * w jednym pobraniu.
-   */
   const seenInvoiceKeys =
     new Set();
 
-  const newInvoices = [];
+  const rows = [];
 
-  for (const inv of allInvoices) {
+  const ksefNumbers = [];
+
+  for (
+    const inv of allInvoices
+  ) {
     // --------------------------------------------------------
-    // Dane z KSeF
+    // Dane KSeF
     // --------------------------------------------------------
 
     const ksefNumber =
@@ -659,11 +922,6 @@ function prepareNewInvoices(
       inv.seller?.nip ||
       "Brak nazwy";
 
-    /*
-     * Faktura bez tych danych
-     * nie może zostać poprawnie
-     * zidentyfikowana.
-     */
     if (
       !ksefNumber ||
       !invoiceNumber ||
@@ -673,8 +931,7 @@ function prepareNewInvoices(
     }
 
     // --------------------------------------------------------
-    // POZIOM 1
-    // Ten sam numer KSeF
+    // 1. Duplikat w bieżącym pobraniu
     // --------------------------------------------------------
 
     if (
@@ -690,7 +947,19 @@ function prepareNewInvoices(
     );
 
     // --------------------------------------------------------
-    // Kwota brutto
+    // 2. Duplikat już zapisany w N
+    // --------------------------------------------------------
+
+    if (
+      existingKsefNumbers.has(
+        ksefNumber
+      )
+    ) {
+      continue;
+    }
+
+    // --------------------------------------------------------
+    // Kwota
     // --------------------------------------------------------
 
     const grossAmount =
@@ -701,12 +970,13 @@ function prepareNewInvoices(
             String(
               inv.grossAmount ??
                 "0"
-            ).replace(",", ".")
+            )
+              .replace(/\s/g, "")
+              .replace(",", ".")
           );
 
     // --------------------------------------------------------
-    // POZIOM 2
-    // Czy faktura już jest w arkuszu?
+    // 3. Fallback dla starych rekordów
     // --------------------------------------------------------
 
     const invoiceKey =
@@ -718,7 +988,7 @@ function prepareNewInvoices(
       });
 
     if (
-      existingKeys.has(
+      existingInvoiceKeys.has(
         invoiceKey
       )
     ) {
@@ -726,9 +996,7 @@ function prepareNewInvoices(
     }
 
     // --------------------------------------------------------
-    // POZIOM 3
-    // Czy ta sama faktura została
-    // już przygotowana w tym pobraniu?
+    // 4. Duplikat w bieżącym pobraniu
     // --------------------------------------------------------
 
     if (
@@ -743,14 +1011,15 @@ function prepareNewInvoices(
       invoiceKey
     );
 
-    /*
-     * Dodajemy klucz od razu do existingKeys.
-     *
-     * Dzięki temu kolejna faktura
-     * w tym samym przebiegu nie przejdzie
-     * ponownie.
-     */
-    existingKeys.add(
+    // --------------------------------------------------------
+    // Dodajemy również do istniejących
+    // --------------------------------------------------------
+
+    existingKsefNumbers.add(
+      ksefNumber
+    );
+
+    existingInvoiceKeys.add(
       invoiceKey
     );
 
@@ -798,28 +1067,143 @@ function prepareNewInvoices(
         : "0,00";
 
     // --------------------------------------------------------
-    // TYLKO B:H
+    // B:J
+    // --------------------------------------------------------
+    //
+    // B = miesiąc
+    // C = data
+    // D = puste
+    // E = puste
+    // F = kontrahent
+    // G = kwota
+    // H = numer faktury
+    // I = uzupelnic
+    // J = uzupelnic
+    //
+    // N zostanie zapisane osobno.
     // --------------------------------------------------------
 
-    newInvoices.push([
-      miesiacFormat, // B
-      `'${issueDate}`, // C
-      "", // D
-      "", // E
-      sellerName, // F
-      kwotaBrutto, // G
-      invoiceNumber, // H
+    rows.push([
+      miesiacFormat,
+      `'${issueDate}`,
+      "",
+      "",
+      sellerName,
+      kwotaBrutto,
+      invoiceNumber,
+      "uzupelnic",
+      "uzupelnic",
     ]);
+
+    ksefNumbers.push(
+      ksefNumber
+    );
   }
 
-  return newInvoices;
+  return {
+    rows,
+    ksefNumbers,
+  };
+}
+
+// ============================================================
+// UKRYWANIE KOLUMNY N
+// ============================================================
+
+async function hideTechnicalColumnN(
+  sheets,
+  spreadsheetId,
+  sheetId
+) {
+  /*
+   * Kolumny są indeksowane od 0:
+   *
+   * A = 0
+   * B = 1
+   * ...
+   * N = 13
+   *
+   * endIndex jest wyłączny,
+   * więc N to 13 -> 14.
+   */
+
+  await sheets.spreadsheets.batchUpdate(
+    {
+      spreadsheetId,
+
+      requestBody: {
+        requests: [
+          {
+            updateDimensionProperties: {
+              range: {
+                sheetId,
+                dimension:
+                  "COLUMNS",
+                startIndex: 13,
+                endIndex: 14,
+              },
+
+              properties: {
+                hiddenByUser:
+                  true,
+              },
+
+              fields:
+                "hiddenByUser",
+            },
+          },
+        ],
+      },
+    }
+  );
+}
+
+// ============================================================
+// ZAPIS N - KSEF NUMBER
+// ============================================================
+
+async function writeKsefNumbers(
+  sheets,
+  spreadsheetId,
+  startRow,
+  endRow,
+  ksefNumbers
+) {
+  if (
+    !ksefNumbers.length
+  ) {
+    return;
+  }
+
+  await sheets.spreadsheets.values.update(
+    {
+      spreadsheetId,
+
+      range:
+        `${SHEET_NAME}!N${startRow}:N${endRow}`,
+
+      valueInputOption:
+        "RAW",
+
+      requestBody: {
+        values:
+          ksefNumbers.map(
+            (number) => [
+              number,
+            ]
+          ),
+      },
+    }
+  );
 }
 
 // ============================================================
 // POST /api/sync
 // ============================================================
 
-export async function POST(request) {
+export async function POST(
+  request
+) {
   try {
     // --------------------------------------------------------
     // 1. Request
@@ -876,7 +1260,10 @@ export async function POST(request) {
       (
         process.env.NIP_FIRMY ||
         ""
-      ).replace(/\D/g, "");
+      ).replace(
+        /\D/g,
+        ""
+      );
 
     if (
       nipFirmy.length !== 10
@@ -922,9 +1309,11 @@ export async function POST(request) {
         credentials: {
           client_email:
             googleServiceAccountEmail,
+
           private_key:
             googlePrivateKey,
         },
+
         scopes: [
           "https://www.googleapis.com/auth/spreadsheets",
         ],
@@ -937,17 +1326,27 @@ export async function POST(request) {
       });
 
     // --------------------------------------------------------
-    // 7. PIERWSZE sprawdzenie arkusza
+    // 7. Informacje o arkuszu
     // --------------------------------------------------------
 
-    let existingKeys =
+    const sheetInfo =
+      await getSheetInfo(
+        sheets,
+        sheetId
+      );
+
+    // --------------------------------------------------------
+    // 8. Odczyt istniejących faktur
+    // --------------------------------------------------------
+
+    let existing =
       await getExistingInvoices(
         sheets,
         sheetId
       );
 
     // --------------------------------------------------------
-    // 8. KSeF authentication
+    // 9. Autoryzacja KSeF
     // --------------------------------------------------------
 
     const accessToken =
@@ -956,7 +1355,7 @@ export async function POST(request) {
       );
 
     // --------------------------------------------------------
-    // 9. Pobierz faktury
+    // 10. Pobranie faktur
     // --------------------------------------------------------
 
     const allInvoices =
@@ -965,44 +1364,74 @@ export async function POST(request) {
       );
 
     // --------------------------------------------------------
-    // 10. WAŻNE:
-    // Ponownie odczytujemy arkusz.
+    // 11. Ponowny odczyt arkusza
+    // --------------------------------------------------------
     //
-    // Dzięki temu nawet jeśli dane zmieniły się
-    // podczas pobierania z KSeF, sprawdzamy
-    // możliwie najnowszy stan przed zapisem.
+    // Robimy to tuż przed deduplikacją,
+    // aby mieć możliwie najnowszy stan.
     // --------------------------------------------------------
 
-    existingKeys =
+    existing =
       await getExistingInvoices(
         sheets,
         sheetId
       );
 
     // --------------------------------------------------------
-    // 11. DEDUPLIKACJA
+    // 12. DEDUPLIKACJA
     // --------------------------------------------------------
 
-    const newInvoices =
+    const prepared =
       prepareNewInvoices(
         allInvoices,
-        existingKeys
+        existing.existingKsefNumbers,
+        existing.existingInvoiceKeys
       );
 
     // --------------------------------------------------------
-    // 12. ZAPIS WYŁĄCZNIE B:H
+    // 13. Nic nowego
     // --------------------------------------------------------
 
     if (
-      newInvoices.length > 0
+      prepared.rows.length === 0
     ) {
+      /*
+       * Nawet jeśli kolumna N była kiedyś
+       * odkryta, ustawiamy ją ponownie jako ukrytą.
+       */
+
+      await hideTechnicalColumnN(
+        sheets,
+        sheetId,
+        sheetInfo.sheetId
+      );
+
+      return NextResponse.json({
+        success: true,
+
+        fetched:
+          allInvoices.length,
+
+        added: 0,
+
+        message:
+          `Znaleziono ${allInvoices.length} faktur ` +
+          `w KSeF. Wszystkie są już w arkuszu.`,
+      });
+    }
+
+    // --------------------------------------------------------
+    // 14. Zapis B:J
+    // --------------------------------------------------------
+
+    const appendResponse =
       await sheets.spreadsheets.values.append(
         {
           spreadsheetId:
             sheetId,
 
           range:
-            "Arkusz1!B:H",
+            `${SHEET_NAME}!B:J`,
 
           valueInputOption:
             "USER_ENTERED",
@@ -1012,25 +1441,98 @@ export async function POST(request) {
 
           requestBody: {
             values:
-              newInvoices,
+              prepared.rows,
           },
         }
       );
-    }
 
     // --------------------------------------------------------
-    // 13. Odpowiedź
+    // 15. Ustalenie numerów wierszy
+    // --------------------------------------------------------
+
+    const updatedRange =
+      appendResponse
+        ?.data
+        ?.updates
+        ?.updatedRange;
+
+    if (!updatedRange) {
+      throw new Error(
+        "Google Sheets: nie udało się ustalić zakresu dodanych faktur."
+      );
+    }
+
+    /*
+     * Przykład:
+     *
+     * Arkusz1!B131:J135
+     *
+     * Szukamy numeru pierwszego
+     * i ostatniego wiersza.
+     */
+
+    const rowMatch =
+      updatedRange.match(
+        /![A-Z]+(\d+):[A-Z]+(\d+)/
+      );
+
+    if (!rowMatch) {
+      throw new Error(
+        `Nie udało się odczytać numerów wierszy z zakresu: ${updatedRange}`
+      );
+    }
+
+    const startRow =
+      parseInt(
+        rowMatch[1],
+        10
+      );
+
+    const endRow =
+      parseInt(
+        rowMatch[2],
+        10
+      );
+
+    // --------------------------------------------------------
+    // 16. Zapis KSeF Number do N
+    // --------------------------------------------------------
+
+    await writeKsefNumbers(
+      sheets,
+      sheetId,
+      startRow,
+      endRow,
+      prepared.ksefNumbers
+    );
+
+    // --------------------------------------------------------
+    // 17. Ukrycie N
+    // --------------------------------------------------------
+
+    await hideTechnicalColumnN(
+      sheets,
+      sheetId,
+      sheetInfo.sheetId
+    );
+
+    // --------------------------------------------------------
+    // 18. Odpowiedź
     // --------------------------------------------------------
 
     return NextResponse.json({
       success: true,
+
       fetched:
         allInvoices.length,
+
       added:
-        newInvoices.length,
+        prepared.rows.length,
+
       message:
-        `Znaleziono faktur w KSeF: ${allInvoices.length}. ` +
-        `Dodano nowych: ${newInvoices.length}.`,
+        `Znaleziono ${allInvoices.length} faktur ` +
+        `w KSeF. Dodano nowych: ` +
+        `${prepared.rows.length}.`,
     });
   } catch (error) {
     console.error(
