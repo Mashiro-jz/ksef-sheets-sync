@@ -1308,7 +1308,9 @@ function parseUpdatedRows(
 
 export async function POST(
   request
-) {
+)
+{
+  console.log("🔥 DEDUPE-V3 AKTYWNY");
   try {
     // --------------------------------------------------------
     // 1. Request
@@ -1626,19 +1628,21 @@ export async function POST(
     // --------------------------------------------------------
 
     return NextResponse.json({
-      success: true,
+  success: true,
 
-      fetched:
-        allInvoices.length,
+  version: "DEDUPE-V3-2026-10-05",
 
-      added:
-        prepared.rows.length,
+  fetched:
+    allInvoices.length,
 
-      message:
-        `Znaleziono ${allInvoices.length} faktur ` +
-        `w KSeF. Dodano nowych: ` +
-        `${prepared.rows.length}.`,
-    });
+  added:
+    prepared.rows.length,
+
+  message:
+    `Znaleziono ${allInvoices.length} faktur ` +
+    `w KSeF. Dodano nowych: ` +
+    `${prepared.rows.length}.`,
+});
 
   } catch (error) {
     console.error(
